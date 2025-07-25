@@ -1,8 +1,11 @@
 ﻿# ADB File Manager - PowerShell Script
 # A feature-rich tool for managing files on Android devices via ADB.
-# Version 3.7 - By Gemini
+# Version 3.8 - By Gemini
 #
 # Key Features & Improvements:
+# - NEW in v3.8: Smart Status Checking!
+#   - The script now intelligently detects device disconnections from command errors.
+#   - This provides instant status updates without sacrificing the performance of the time-based cache.
 # - NEW in v3.7: Optimized Size Calculation!
 #   - The script now uses a single 'adb' command to get the size of multiple directories.
 #   - This dramatically speeds up the confirmation step when pulling several folders at once.
@@ -67,6 +70,17 @@ function Invoke-AdbCommand {
 
     if (-not $success) {
         Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR"
+        # --- ELEGANT STATUS CHECK (v3.8) ---
+        # If a command fails, check if it's due to a disconnection.
+        # This makes the script instantly aware of a disconnected device without constant polling.
+        if ($output -match "device not found|device offline|no devices/emulators found") {
+            Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
+            $script:DeviceStatus.IsConnected = $false
+            $script:DeviceStatus.DeviceName   = "No Device"
+            $script:DeviceStatus.SerialNumber = ""
+            # By resetting the timestamp, we force Update-DeviceStatus to do a full check next time it's called.
+            $script:LastStatusUpdateTime = [DateTime]::MinValue 
+        }
     }
 
     if ($HideOutput) {
@@ -148,7 +162,7 @@ function Show-UIHeader {
     Clear-Host
     Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "║                    🤖 ADB FILE MANAGER                     ║" -ForegroundColor Cyan
-    Write-Host "║                  v3.7 with Size Calc Boost                 ║" -ForegroundColor Cyan
+    Write-Host "║                  v3.8 with Smart Status                  ║" -ForegroundColor Cyan
     Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
     Update-DeviceStatus
@@ -226,7 +240,6 @@ function Show-InlineProgress {
 
 # --- File and Directory Size Calculation ---
 
-# --- FIX (v3.7) ---
 # Gets the size of multiple Android items (files/dirs) using an optimized single command for directories.
 function Get-AndroidItemsSize {
     param(
@@ -412,7 +425,7 @@ function Pull-FilesFromAndroid {
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
-    # --- FIX (v3.7): Confirmation Wizard with OPTIMIZED Size Calculation ---
+    # --- Confirmation Wizard with OPTIMIZED Size Calculation ---
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
     Write-Host "Calculating total size... Please wait." -NoNewline
 
@@ -811,7 +824,7 @@ function Start-ADBTool {
         return
     }
 
-    Write-Log "ADB File Manager v3.7 Started" "INFO"
+    Write-Log "ADB File Manager v3.8 Started" "INFO"
     Show-MainMenu
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
