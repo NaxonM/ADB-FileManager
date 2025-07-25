@@ -654,5 +654,6 @@ function New-AndroidFolder {
         # The error is already logged by Invoke-AdbCommand
     }
 }
+
 # Start the application
 Start-ADBTool
