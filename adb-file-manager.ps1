@@ -1,4 +1,4 @@
-# ADB File Manager - PowerShell Script
+﻿# ADB File Manager - PowerShell Script
 # A feature-rich tool for managing files on Android devices via ADB.
 
 # Load required assemblies
@@ -9,7 +9,7 @@ Add-Type -AssemblyName System.Drawing
 $script:LogFile = "ADB_Operations_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 $script:DeviceStatus = @{
     IsConnected = $false
-    DeviceName = "No Device"
+    DeviceName  = "No Device"
     SerialNumber = ""
 }
 
@@ -34,44 +34,93 @@ function Invoke-AdbCommand {
     )
     Write-Log "Executing ADB Command: adb $Command" "DEBUG"
 
-    $result = & adb $Command 2>&1
-    $exitCode = $LASTEXITCODE
+    # Using Start-Process to get more reliable exit codes and output handling
+    $process = Start-Process adb -ArgumentList $Command -Wait -NoNewWindow -PassThru -RedirectStandardOutput "temp_stdout.txt" -RedirectStandardError "temp_stderr.txt"
+    $exitCode = $process.ExitCode
+    $stdout = Get-Content "temp_stdout.txt" -Raw -ErrorAction SilentlyContinue
+    $stderr = Get-Content "temp_stderr.txt" -Raw -ErrorAction SilentlyContinue
+    Remove-Item "temp_stdout.txt", "temp_stderr.txt" -ErrorAction SilentlyContinue
 
     $success = ($exitCode -eq 0)
+    $output = if ($success) { $stdout } else { $stderr }
 
     if (-not $success) {
-        Write-Log "ADB command failed with exit code $exitCode. Error: $result" "ERROR"
+        Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR"
     }
 
     if ($HideOutput) {
         return [PSCustomObject]@{
             Success = $success
-            Output = "" # Hide output if requested
+            Output  = "" # Hide output if requested
         }
     }
 
     return [PSCustomObject]@{
         Success = $success
-        Output = $result
+        Output  = $output
     }
 }
+
+# Function to run a transfer with a progress indicator
+function Invoke-AdbTransferWithProgress {
+    param(
+        [string]$Activity,
+        [scriptblock]$AdbCommand,
+        [string]$DestinationFileForPull, # Only for pull operations to check file size
+        [long]$TotalSizeForPull          # Only for pull operations
+    )
+
+    $job = Start-Job -ScriptBlock $AdbCommand
+    $spinner = @('|', '/', '-', '\')
+    $spinnerIndex = 0
+
+    while ($job.State -eq 'Running') {
+        if ($DestinationFileForPull -and (Test-Path $DestinationFileForPull) -and $TotalSizeForPull -gt 0) {
+            # Detailed progress for PULL
+            $currentSize = (Get-Item $DestinationFileForPull).Length
+            $percent = [math]::Round(($currentSize / $TotalSizeForPull) * 100)
+            $status = "Pulling: {0:N2} MB / {1:N2} MB" -f ($currentSize / 1MB), ($TotalSizeForPull / 1MB)
+            Write-Progress -Activity $Activity -Status $status -PercentComplete $percent
+        }
+        else {
+            # Spinner for PUSH or when size is unknown
+            $status = "Transferring... $($spinner[$spinnerIndex])"
+            Write-Progress -Activity $Activity -Status $status
+            $spinnerIndex = ($spinnerIndex + 1) % $spinner.Length
+        }
+        Start-Sleep -Milliseconds 150
+    }
+
+    Write-Progress -Activity $Activity -Completed
+    $result = Receive-Job $job
+    $success = $job.JobStateInfo.State -eq 'Completed' # Check job state for success
+    Remove-Job $job
+
+    return [PSCustomObject]@{
+        Success = $success
+        Output  = $result
+    }
+}
+
 
 # Function to update the global device status
 function Update-DeviceStatus {
     $result = Invoke-AdbCommand "devices"
-    if ($result.Success -and ($result.Output | Select-String -Pattern "device$")) {
+    if ($result.Success -and ($result.Output | Select-String -Pattern "`tdevice$")) {
         $script:DeviceStatus.IsConnected = $true
         # Get serial number and device name
-        $deviceInfo = $result.Output | Select-String -Pattern "device$" | Select-Object -First 1
+        $deviceInfo = $result.Output -split '\r?\n' | Where-Object { $_ -match "`tdevice$" } | Select-Object -First 1
         $script:DeviceStatus.SerialNumber = ($deviceInfo -split "`t")[0]
-        $deviceNameResult = Invoke-AdbCommand "shell getprop ro.product.model"
+        $deviceNameResult = Invoke-AdbCommand "-s $($script:DeviceStatus.SerialNumber) shell getprop ro.product.model"
         if ($deviceNameResult.Success) {
             $script:DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
-        } else {
+        }
+        else {
             $script:DeviceStatus.DeviceName = "Unknown Device"
         }
         Write-Log "Device connected: $($script:DeviceStatus.DeviceName) ($($script:DeviceStatus.SerialNumber))" "INFO"
-    } else {
+    }
+    else {
         $script:DeviceStatus.IsConnected = $false
         $script:DeviceStatus.DeviceName = "No Device"
         $script:DeviceStatus.SerialNumber = ""
@@ -91,8 +140,9 @@ function Show-UIHeader {
     Update-DeviceStatus
     $statusText = "🔌 Status: "
     if ($script:DeviceStatus.IsConnected) {
-        Write-Host "$statusText $($script:DeviceStatus.DeviceName) - Connected" -ForegroundColor Green
-    } else {
+        Write-Host "$statusText $($script:DeviceStatus.DeviceName) ($($script:DeviceStatus.SerialNumber)) - Connected" -ForegroundColor Green
+    }
+    else {
         Write-Host "$statusText Disconnected" -ForegroundColor Red
     }
     Write-Host "═" * 62 -ForegroundColor Gray
@@ -115,36 +165,48 @@ function Get-AndroidDirectoryContents {
     }
 
     $items = @()
-    $lines = $result.Output -split '\r?\n' | Where-Object { $_ -and $_ -notlike 'total *' }
+    # Handle both LF and CRLF line endings
+    $lines = $result.Output -split '\r?\n' | Where-Object { $_ -and $_ -notlike 'total *' -and $_ -notlike '*No such file or directory*' }
 
     foreach ($line in $lines) {
         # Parsing ls -la output. This is complex and might need adjustments for different Android versions.
-        # Example line: drwxr-xr-x 4 root root 4096 2023-10-27 10:00 cache
         $parts = $line -split '\s+', 9
-        if ($parts.Count -lt 9) { continue } # Skip malformed lines
+        if ($parts.Count -lt 6) { continue } # Skip malformed lines
 
         $permissions = $parts[0]
         $type = if ($permissions.StartsWith('d')) { "Directory" } elseif ($permissions.StartsWith('l')) { "Link" } else { "File" }
+        
+        # Find the date/time part to reliably get the name
+        $nameIndex = -1
+        for ($i = 5; $i -lt $parts.Length; $i++) {
+            if ($parts[$i] -match '^\d{2}:\d{2}$') { # Matches HH:mm
+                $nameIndex = $i + 1
+                break
+            }
+        }
 
-        # The file name is the last part. It can contain spaces.
-        $name = $parts[8].Trim()
+        if ($nameIndex -eq -1 -or $nameIndex -ge $parts.Length) { continue } # Could not find name
+
+        $name = $parts[$nameIndex..($parts.Length -1)] -join ' '
 
         if ($name -eq "." -or $name -eq "..") { continue }
+        
+        # Handle symlinks where name is 'link -> target'
+        $name = ($name -split ' -> ')[0]
 
         # Rejoin path, handling root case
-        $fullPath = if ($Path -eq "/") { "/$name" } else { "$Path/$name" }
+        $fullPath = if ($Path.EndsWith('/')) { "$Path$name" } else { "$Path/$name" }
 
         $items += [PSCustomObject]@{
-            Name        = $name
+            Name        = $name.Trim()
             Type        = $type
             Permissions = $permissions
-            Size        = if ($type -eq 'File') { [long]$parts[4] } else { 0 }
-            ModifiedDate = [datetime]::ParseExact("$($parts[5]) $($parts[6])", "yyyy-MM-dd HH:mm", $null)
             FullPath    = $fullPath
         }
     }
     return $items
 }
+
 
 # Function to browse Android file system with interactive actions
 function Browse-AndroidFileSystem {
@@ -166,7 +228,7 @@ function Browse-AndroidFileSystem {
         )
 
         $displayItems = $navItems + $items
-        $selectedItem = $displayItems | Select-Object Name, Type, Size, ModifiedDate | Out-GridView -Title "Browse: $currentPath" -OutputMode Single
+        $selectedItem = $displayItems | Select-Object Name, Type | Out-GridView -Title "Browse: $currentPath" -OutputMode Single
 
         if (-not $selectedItem) { continue }
 
@@ -177,7 +239,7 @@ function Browse-AndroidFileSystem {
             ".. (Go Up)" {
                 if ($currentPath -ne "/") {
                     $parentPath = $currentPath.TrimEnd('/') | Split-Path -Parent
-                    $currentPath = if ([string]::IsNullOrEmpty($parentPath)) { "/" } else { $parentPath }
+                    $currentPath = if ([string]::IsNullOrEmpty($parentPath) -or $parentPath -eq '\') { "/" } else { $parentPath }
                 }
             }
             default {
@@ -196,49 +258,56 @@ function Browse-AndroidFileSystem {
 function Show-ItemActionMenu {
     param($Item)
 
-    Clear-Host
-    Show-UIHeader
-    Write-Host "Selected Item: $($Item.FullPath)" -ForegroundColor Cyan
-    Write-Host "---------------------------------"
-    Write-Host "Choose an action:"
-    Write-Host "1. Pull to PC"
-    Write-Host "2. Move to PC (Pull + Delete)"
-    Write-Host "3. Rename"
-    Write-Host "4. Delete"
-    Write-Host "5. Copy (on device)"
-    Write-Host "6. Move (on device)"
-    Write-Host "7. Back to browser"
+    # Loop until user chooses to go back
+    while ($true) {
+        Clear-Host
+        Show-UIHeader
+        Write-Host "Selected Item: $($Item.FullPath)" -ForegroundColor Cyan
+        Write-Host "---------------------------------"
+        Write-Host "Choose an action:"
+        Write-Host "1. Pull to PC"
+        Write-Host "2. Move to PC (Pull + Delete)"
+        Write-Host "3. Rename"
+        Write-Host "4. Delete"
+        Write-Host "5. Copy (on device)"
+        Write-Host "6. Move (on device)"
+        Write-Host "7. Back to browser"
 
-    $action = Read-Host "`nEnter your choice (1-7)"
-    switch ($action) {
-        "1" {
-            Pull-FilesFromAndroid -Path $Item.FullPath
-            Read-Host "Press Enter to continue"
-        }
-        "2" {
-            Pull-FilesFromAndroid -Path $Item.FullPath -Move
-            Read-Host "Press Enter to continue"
-        }
-        "3" {
-            Rename-AndroidItem -ItemPath $Item.FullPath
-            Read-Host "Press Enter to continue"
-        }
-        "4" {
-            Remove-AndroidItem -ItemPath $Item.FullPath
-            Read-Host "Press Enter to continue"
-        }
-        "5" {
-            Copy-AndroidItem -SourcePath $Item.FullPath
-            Read-Host "Press Enter to continue"
-        }
-        "6" {
-            Move-AndroidItem -SourcePath $Item.FullPath
-            Read-Host "Press Enter to continue"
-        }
-        "7" { return }
-        default {
-            Write-Host "Invalid choice." -ForegroundColor Red
-            Read-Host "Press Enter to continue"
+        $action = Read-Host "`nEnter your choice (1-7)"
+        switch ($action) {
+            "1" {
+                Pull-FilesFromAndroid -Path $Item.FullPath
+                Read-Host "Press Enter to continue"
+            }
+            "2" {
+                Pull-FilesFromAndroid -Path $Item.FullPath -Move
+                Read-Host "Press Enter to continue"
+            }
+            "3" {
+                # Rename can change the item path, so we need to update it
+                $newItem = Rename-AndroidItem -ItemPath $Item.FullPath
+                if ($newItem) { $Item = $newItem } # Update the item if rename was successful
+                Read-Host "Press Enter to continue"
+            }
+            "4" {
+                Remove-AndroidItem -ItemPath $Item.FullPath
+                Read-Host "Press Enter to continue"
+                return # Item is deleted, so we must exit the action menu
+            }
+            "5" {
+                Copy-AndroidItem -SourcePath $Item.FullPath
+                Read-Host "Press Enter to continue"
+            }
+            "6" {
+                Move-AndroidItem -SourcePath $Item.FullPath
+                Read-Host "Press Enter to continue"
+                return # Item is moved, so we must exit the action menu
+            }
+            "7" { return }
+            default {
+                Write-Host "Invalid choice." -ForegroundColor Red
+                Read-Host "Press Enter to continue"
+            }
         }
     }
 }
@@ -252,104 +321,13 @@ function Show-FolderPicker {
     $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
     $folderBrowser.Description = $Description
     $folderBrowser.ShowNewFolderButton = $true
-    if ($folderBrowser.ShowDialog() -eq 'OK') {
+    if ($folderBrowser.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true })) -eq 'OK') {
         return $folderBrowser.SelectedPath
     }
     return $null
 }
 
-# Function to show a detailed transfer progress bar
-function Show-TransferProgress {
-    param(
-        [string]$Activity,
-        [string]$SourcePath, # For pull, this is the destination. For push, the source.
-        [long]$TotalSize,
-        [scriptblock]$AdbCommand,
-        [string]$TransferType # 'push' or 'pull'
-    )
-
-    $job = Start-Job -ScriptBlock $AdbCommand
-    $startTime = Get-Date
-
-    while ($job.State -eq 'Running') {
-        Start-Sleep -Milliseconds 250
-
-        if ($TransferType -eq 'pull') {
-            $transferred = 0
-            if (Test-Path $SourcePath) {
-                $transferred = (Get-Item $SourcePath).Length
-            }
-            $elapsed = (Get-Date) - $startTime
-            $speed = if ($elapsed.TotalSeconds -gt 0) { $transferred / $elapsed.TotalSeconds } else { 0 }
-            $percent = if ($TotalSize -gt 0) { ($transferred / $TotalSize) * 100 } else { 0 }
-            $remaining = if ($speed -gt 0) { ($TotalSize - $transferred) / $speed } else { 0 }
-            $status = "Pulled {0:N2} MB of {1:N2} MB ({2:N2} MB/s). ETA: {3:N0}s" -f ($transferred / 1MB), ($TotalSize / 1MB), ($speed / 1MB), $remaining
-            Write-Progress -Activity $Activity -Status $status -PercentComplete $percent
-
-        } elseif ($TransferType -eq 'push') {
-            # For push, we can't easily check the remote file size.
-            # We'll rely on the output of the adb command itself, which sadly doesn't stream percentage for single files well.
-            # This will be more of a "spinner" than a detailed progress bar for push.
-            $status = "Pushing file... (This may take a while for large files)"
-            Write-Progress -Activity $Activity -Status $status
-        }
-    }
-
-    $result = Receive-Job $job
-    Remove-Job $job
-
-    return $result
-}
-
-# Function to push files to Android with detailed progress
-function Push-FilesToAndroid {
-    param([switch]$Move)
-    Write-Host "📤 PUSH FILES TO ANDROID" -ForegroundColor Magenta
-    
-    $sourceFolder = Show-FolderPicker "Select source folder on your PC"
-    if (-not $sourceFolder) { Write-Host "❌ No folder selected." -ForegroundColor Red; return }
-
-    $destinationPath = Read-Host -Prompt 'Enter destination path on Android (e.g., /sdcard/Download/)'
-    if ([string]::IsNullOrWhiteSpace($destinationPath)) { $destinationPath = "/sdcard/Download/" }
-
-    $files = Get-ChildItem -Path $sourceFolder -File | Select-Object Name, FullName, Length
-    if ($files.Count -eq 0) {
-        Write-Host "⚠️ No files found." -ForegroundColor Yellow
-        return
-    }
-    
-    $selectedFiles = $files | Out-GridView -Title "Select files to push" -OutputMode Multiple
-    if ($selectedFiles.Count -eq 0) { return }
-
-    $successCount = 0
-    $failureCount = 0
-
-    foreach ($file in $selectedFiles) {
-        $sourceFileSafe = """$($file.FullName)"""
-        $destPathSafe = """$destinationPath"""
-        
-        $adbCommand = {
-            param($source, $dest)
-            & adb push $source $dest
-        }
-
-        $result = Show-TransferProgress -Activity "Pushing $($file.Name)" -SourcePath $file.FullName -TotalSize $file.Length -AdbCommand $adbCommand -ArgumentList $sourceFileSafe, $destPathSafe -TransferType 'push'
-
-        if ($LASTEXITCODE -eq 0) {
-            $successCount++
-            if ($Move) {
-                Remove-Item -Path $file.FullName -Force
-            }
-        } else {
-            $failureCount++
-            Write-Host "`n❌ Failed to push $($file.Name)." -ForegroundColor Red
-        }
-    }
-    Write-Progress -Activity "Pushing Files" -Completed
-    Write-Host "`n📊 TRANSFER SUMMARY: ✅ $successCount Successful, ❌ $failureCount Failed" -ForegroundColor Cyan
-}
-
-# Function to pull files from Android with detailed progress
+# Function to pull files from Android
 function Pull-FilesFromAndroid {
     param(
         [string]$Path,
@@ -360,49 +338,99 @@ function Pull-FilesFromAndroid {
     $sourcePath = if ($Path) { $Path } else { Read-Host -Prompt 'Enter source path on Android (e.g., /sdcard/Download/)' }
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { $sourcePath = "/sdcard/Download/" }
 
-    $items = Get-AndroidDirectoryContents $sourcePath
-    if ($items.Count -eq 0) { return }
+    # Check if the source is a directory or a file
+    $sourceIsDirResult = Invoke-AdbCommand "shell ls -ld ""$sourcePath"""
+    $isDir = $sourceIsDirResult.Success -and $sourceIsDirResult.Output.StartsWith('d')
 
-    $selectedItems = if ($Path) { $items | Where-Object { $_.FullPath -eq $Path } } else { $items | Where-Object { $_.Type -eq 'File' } | Out-GridView -Title "Select files to pull" -OutputMode Multiple }
-    if ($selectedItems.Count -eq 0) { return }
+    $itemsToPull = @()
+    if ($isDir) {
+        $items = Get-AndroidDirectoryContents $sourcePath
+        if ($items.Count -eq 0) { Write-Host "Directory is empty or inaccessible." -ForegroundColor Yellow; return }
+        $itemsToPull = $items | Where-Object { $_.Type -ne 'Directory' } | Out-GridView -Title "Select files to pull" -OutputMode Multiple
+    } else {
+        # It's a single file
+        $itemName = Split-Path $sourcePath -Leaf
+        $itemsToPull += [PSCustomObject]@{ Name = $itemName; FullPath = $sourcePath }
+    }
+    
+    if ($itemsToPull.Count -eq 0) { Write-Host "No files selected." -ForegroundColor Yellow; return }
 
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { return }
 
-    $createNewDir = Read-Host "Create a new directory for the pulled files? [y/N]"
-    if ($createNewDir -eq 'y') {
-        $newDirName = Read-Host "Enter the name for the new directory"
-        if (-not [string]::IsNullOrWhiteSpace($newDirName)) {
-            $destinationFolder = Join-Path $destinationFolder $newDirName
-            New-Item -Path $destinationFolder -ItemType Directory -Force
+    $successCount = 0
+    $failureCount = 0
+
+    foreach ($item in $itemsToPull) {
+        $sourceItemSafe = """$($item.FullPath)"""
+        $destFileSafe = Join-Path $destinationFolder $item.Name
+        
+        # Get file size for progress bar
+        $sizeResult = Invoke-AdbCommand "shell stat -c %s ""$($item.FullPath)"""
+        [long]$totalSize = 0
+        if ($sizeResult.Success) { $totalSize = [long]$sizeResult.Output }
+
+        $adbCommand = {
+            param($source, $dest)
+            adb pull $source $dest
+        }
+
+        $result = Invoke-AdbTransferWithProgress -Activity "Pulling $($item.Name)" -AdbCommand $adbCommand -ArgumentList $sourceItemSafe, $destFileSafe -DestinationFileForPull $destFileSafe -TotalSizeForPull $totalSize
+
+        if ($result.Success) {
+            $successCount++
+            if ($Move) {
+                Write-Host "   - Removing source file..." -NoNewline
+                $deleteResult = Invoke-AdbCommand "shell rm `"$($item.FullPath)`""
+                if ($deleteResult.Success) { Write-Host " ✅" -ForegroundColor Green }
+                else { Write-Host " ❌" -ForegroundColor Red }
+            }
+        } else {
+            $failureCount++
+            Write-Host "`n❌ Failed to pull $($item.Name). Error: $($result.Output)" -ForegroundColor Red
         }
     }
+    Write-Host "`n📊 TRANSFER SUMMARY: ✅ $successCount Successful, ❌ $failureCount Failed" -ForegroundColor Cyan
+}
+
+# Function to push files to Android
+function Push-FilesToAndroid {
+    param([switch]$Move)
+    Write-Host "📤 PUSH FILES TO ANDROID" -ForegroundColor Magenta
+    
+    $sourceFiles = Show-OpenFilePicker -Title "Select files to push" -MultiSelect
+    if (-not $sourceFiles) { Write-Host "❌ No files selected." -ForegroundColor Red; return }
+
+    $destinationPath = Read-Host -Prompt 'Enter destination path on Android (e.g., /sdcard/Download/)'
+    if ([string]::IsNullOrWhiteSpace($destinationPath)) { $destinationPath = "/sdcard/Download/" }
 
     $successCount = 0
     $failureCount = 0
 
-    foreach ($item in $selectedItems) {
-        $sourceItemSafe = """$($item.FullPath)"""
-        $destFileSafe = """$(Join-Path $destinationFolder $item.Name)"""
+    foreach ($file in $sourceFiles) {
+        $fileInfo = Get-Item $file
+        $sourceFileSafe = """$($fileInfo.FullName)"""
+        $destPathSafe = """$destinationPath"""
         
         $adbCommand = {
             param($source, $dest)
-            & adb pull $source $dest
+            adb push $source $dest
         }
 
-        $result = Show-TransferProgress -Activity "Pulling $($item.Name)" -SourcePath $destFileSafe -TotalSize $item.Size -AdbCommand $adbCommand -ArgumentList $sourceItemSafe, $destFileSafe -TransferType 'pull'
+        $result = Invoke-AdbTransferWithProgress -Activity "Pushing $($fileInfo.Name)" -AdbCommand $adbCommand -ArgumentList $sourceFileSafe, $destPathSafe
 
-        if ($LASTEXITCODE -eq 0) {
+        if ($result.Success) {
             $successCount++
             if ($Move) {
-                Invoke-AdbCommand "shell rm `"$($item.FullPath)`""
+                Write-Host "   - Removing source file..." -NoNewline
+                Remove-Item -Path $fileInfo.FullName -Force -ErrorAction SilentlyContinue
+                Write-Host " ✅" -ForegroundColor Green
             }
         } else {
             $failureCount++
-            Write-Host "`n❌ Failed to pull $($item.Name)." -ForegroundColor Red
+            Write-Host "`n❌ Failed to push $($fileInfo.Name). Error: $($result.Output)" -ForegroundColor Red
         }
     }
-    Write-Progress -Activity "Pulling Items" -Completed
     Write-Host "`n📊 TRANSFER SUMMARY: ✅ $successCount Successful, ❌ $failureCount Failed" -ForegroundColor Cyan
 }
 
@@ -410,7 +438,7 @@ function Pull-FilesFromAndroid {
 function Copy-AndroidItem {
     param([string]$SourcePath)
 
-    $destinationPath = Read-Host "Enter the destination path"
+    $destinationPath = Read-Host "Enter the destination directory"
     if ([string]::IsNullOrWhiteSpace($destinationPath)) {
         Write-Host "❌ Invalid destination path." -ForegroundColor Red
         return
@@ -430,15 +458,9 @@ function Copy-AndroidItem {
 function Move-AndroidItem {
     param([string]$SourcePath)
 
-    $destinationPath = Read-Host "Enter the destination path"
+    $destinationPath = Read-Host "Enter the destination path (can be a new name in the same directory)"
     if ([string]::IsNullOrWhiteSpace($destinationPath)) {
         Write-Host "❌ Invalid destination path." -ForegroundColor Red
-        return
-    }
-
-    $confirmation = Read-Host "Are you sure you want to move this item? [y/N]"
-    if ($confirmation -ne 'y') {
-        Write-Host "Move cancelled." -ForegroundColor Yellow
         return
     }
 
@@ -478,14 +500,14 @@ function Remove-AndroidItem {
     param([string]$ItemPath)
 
     $itemName = Split-Path $ItemPath -Leaf
-    $confirmation = Read-Host "Are you sure you want to permanently delete '$itemName'? [y/N]"
+    $confirmation = Read-Host "Are you sure you want to permanently delete '$itemName'? This cannot be undone. [y/N]"
     if ($confirmation -ne 'y') {
         Write-Host "Deletion cancelled." -ForegroundColor Yellow
         return
     }
 
-    # Use 'rm -r' for directories and 'rm' for files
-    $command = "shell rm -r ""$ItemPath"""
+    # Use 'rm -rf' for directories and 'rm' for files
+    $command = "shell rm -rf ""$ItemPath""" # Added -f to force deletion
     $result = Invoke-AdbCommand $command
 
     if ($result.Success) {
@@ -499,23 +521,32 @@ function Remove-AndroidItem {
 function Rename-AndroidItem {
     param([string]$ItemPath)
 
+    $originalItem = Get-AndroidDirectoryContents (Split-Path $ItemPath -Parent) | Where-Object { $_.FullPath -eq $ItemPath }
     $itemName = Split-Path $ItemPath -Leaf
     $newName = Read-Host "Enter the new name for '$itemName'"
-    if ([string]::IsNullOrWhiteSpace($newName)) {
-        Write-Host "❌ Invalid name." -ForegroundColor Red
-        return
+    if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Contains('/') -or $newName.Contains('\')) {
+        Write-Host "❌ Invalid name. Name cannot be empty or contain slashes." -ForegroundColor Red
+        return $null
     }
 
     $parentPath = Split-Path $ItemPath -Parent
-    $newItemPath = "$parentPath/$newName"
+    $newItemPath = if ($parentPath -eq "/") { "/$newName" } else { "$parentPath/$newName" }
 
     $command = "shell mv ""$ItemPath"" ""$newItemPath"""
     $result = Invoke-AdbCommand $command
 
     if ($result.Success) {
         Write-Host "✅ Successfully renamed to '$newName'." -ForegroundColor Green
+        # Return the new item object so the caller can update its state
+        return [PSCustomObject]@{
+            Name     = $newName
+            FullPath = $newItemPath
+            Type     = $originalItem.Type # Assume type stays the same
+            Permissions = $originalItem.Permissions
+        }
     } else {
         Write-Host "❌ Failed to rename. Error: $($result.Output)" -ForegroundColor Red
+        return $null
     }
 }
 
@@ -523,16 +554,18 @@ function Rename-AndroidItem {
 function Install-AndroidPackage {
     Write-Host "📦 INSTALL ANDROID PACKAGE (APK)" -ForegroundColor Magenta
 
-    $apkPath = Show-OpenFilePicker "Select APK file to install"
-    if (-not $apkPath) { return }
+    $apkPaths = Show-OpenFilePicker -Title "Select APK file(s) to install" -MultiSelect
+    if (-not $apkPaths) { return }
 
-    Write-Host "Installing '$apkPath'..." -ForegroundColor Yellow
-    $result = Invoke-AdbCommand "install `"$apkPath`""
+    foreach ($apkPath in $apkPaths) {
+        Write-Host "Installing '$apkPath'..." -ForegroundColor Yellow
+        $result = Invoke-AdbCommand "install -r `"$apkPath`"" # Added -r to allow reinstall/update
 
-    if ($result.Success -and $result.Output -match "Success") {
-        Write-Host "✅ Successfully installed package." -ForegroundColor Green
-    } else {
-        Write-Host "❌ Failed to install package. Error: $($result.Output)" -ForegroundColor Red
+        if ($result.Success -and $result.Output -match "Success") {
+            Write-Host "✅ Successfully installed package." -ForegroundColor Green
+        } else {
+            Write-Host "❌ Failed to install package. Error: $($result.Output)" -ForegroundColor Red
+        }
     }
 }
 
@@ -569,12 +602,15 @@ function Show-MainMenu {
 # Function to show file picker dialog
 function Show-OpenFilePicker {
     param(
-        [string]$Title = "Select a file"
+        [string]$Title = "Select a file",
+        [switch]$MultiSelect
     )
     $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
     $fileDialog.Title = $Title
-    if ($fileDialog.ShowDialog() -eq 'OK') {
-        return $fileDialog.FileName
+    $fileDialog.Filter = "All files (*.*)|*.*|APK files (*.apk)|*.apk"
+    $fileDialog.Multiselect = $MultiSelect
+    if ($fileDialog.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true })) -eq 'OK') {
+        return $fileDialog.FileNames
     }
     return $null
 }
@@ -587,7 +623,7 @@ function New-AndroidFolder {
     }
 
     # Using the new centralized function
-    $result = Invoke-AdbCommand "shell `"mkdir -p `"$folderPath`"`""
+    $result = Invoke-AdbCommand "shell mkdir -p `"$folderPath`""
 
     if ($result.Success) {
         Write-Host "✅ Successfully created folder: $folderPath" -ForegroundColor Green
@@ -629,13 +665,13 @@ function Start-ADBTool {
             "5" { 
                 $itemPath = Read-Host "Enter the full path of the item to remove"
                 if (-not [string]::IsNullOrWhiteSpace($itemPath)) {
-                    Remove-AndroidItem $itemPath
+                    Remove-AndroidItem -ItemPath $itemPath
                 }
             }
             "6" {
                 $itemPath = Read-Host "Enter the full path of the item to rename"
                 if (-not [string]::IsNullOrWhiteSpace($itemPath)) {
-                    Rename-AndroidItem $itemPath
+                    Rename-AndroidItem -ItemPath $itemPath
                 }
             }
             "7" { Install-AndroidPackage }
@@ -648,9 +684,9 @@ function Start-ADBTool {
             default { Write-Host "❌ Invalid choice." -ForegroundColor Red }
         }
         
-        if ($choice -in "1", "2", "3", "4", "5", "6", "7", "8", "9") {
+        if ($choice -in "1", "2", "4", "5", "6", "7", "8", "9") {
             Write-Host "`nPress Enter to return to the menu..." -ForegroundColor Yellow
-            $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            Read-Host | Out-Null
         }
     } while ($true)
 }
