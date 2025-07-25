@@ -1,16 +1,16 @@
 ﻿# ADB File Manager - PowerShell Script
 # A feature-rich tool for managing files on Android devices via ADB.
-# Version 3.5 - By Gemini
+# Version 3.6 - By Gemini
 #
 # Key Features & Improvements:
-# - FIX in v3.5: Path Canonicalization!
-#   - The script now uses 'readlink -f' on the Android device to find the real path of a directory before listing its contents.
-#   - This resolves issues where browsing symbolic links (like /sdcard) would result in incorrect listings.
-# - FIX in v3.5: Array Handling!
-#   - The file browser now explicitly casts the results of Get-AndroidDirectoryContents to an array.
-#   - This fixes the "Invalid selection" bug that occurred when a directory contained only one item.
+# - NEW in v3.6: Major Performance Boost!
+#   - The device status check is now cached for 15 seconds.
+#   - This eliminates redundant 'adb' commands during rapid directory navigation,
+#     making the file browser significantly faster and more responsive.
+# - FIX in v3.5: Path Canonicalization to correctly handle symbolic links.
+# - FIX in v3.5: Array Handling to fix "Invalid selection" bug.
 # - FIX in v3.4: Robust Progress Bar to prevent crashes.
-# - FIX in v3.3: Robust Path Handling for special characters and Caching Logic.
+# - FIX in v3.3: Robust Path Handling and Caching Logic.
 # - Directory Content Caching, Optimized Transfers, ETR & Progress Bar, Confirmation Screen.
 
 # Load required assemblies for GUI pickers
@@ -26,6 +26,9 @@ $script:DeviceStatus = @{
 }
 # Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
 $script:DirectoryCache = @{}
+# --- FIX (v3.6) ---
+# Timestamp for the last device status check to prevent excessive ADB calls.
+$script:LastStatusUpdateTime = [DateTime]::MinValue
 
 # --- Core ADB and Logging Functions ---
 
@@ -71,8 +74,15 @@ function Invoke-AdbCommand {
     return [PSCustomObject]@{ Success = $success; Output  = $output.Trim() }
 }
 
-# Function to update the global device status
+# --- FIX (v3.6) ---
+# OPTIMIZED to only run expensive ADB commands periodically.
 function Update-DeviceStatus {
+    # If a device is connected and we checked less than 15 seconds ago, skip the check.
+    if ($script:DeviceStatus.IsConnected -and ((Get-Date) - $script:LastStatusUpdateTime).TotalSeconds -lt 15) {
+        return
+    }
+
+    Write-Log "Performing full device status check." "DEBUG"
     $result = Invoke-AdbCommand "devices"
     $firstDeviceLine = $result.Output -split '\r?\n' | Where-Object { $_ -match '\s+device$' } | Select-Object -First 1
 
@@ -94,6 +104,8 @@ function Update-DeviceStatus {
         $script:DeviceStatus.SerialNumber = ""
         Write-Log "No device connected." "INFO"
     }
+    # Update the timestamp after a full check.
+    $script:LastStatusUpdateTime = (Get-Date)
 }
 
 # --- Caching Functions ---
@@ -135,7 +147,7 @@ function Show-UIHeader {
     Clear-Host
     Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "║                    🤖 ADB FILE MANAGER                     ║" -ForegroundColor Cyan
-    Write-Host "║                 v3.5 with Link & Path Fixes                ║" -ForegroundColor Cyan
+    Write-Host "║                 v3.6 with Performance Boost                ║" -ForegroundColor Cyan
     Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
     Update-DeviceStatus
@@ -245,7 +257,6 @@ function Get-LocalItemSize {
 
 # --- Core File Operations ---
 
-# UPDATED in v3.5 to handle symbolic links correctly
 function Get-AndroidDirectoryContents {
     param(
         [string]$Path
@@ -261,7 +272,6 @@ function Get-AndroidDirectoryContents {
     }
     Write-Log "CACHE MISS: Fetching contents for '$normalizedPath' from device." "DEBUG"
 
-    # --- FIX STARTS HERE (v3.5) ---
     # Canonicalize the path to resolve symbolic links before listing contents.
     $canonicalResult = Invoke-AdbCommand "shell readlink -f '$normalizedPath'"
     $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) { 
@@ -270,7 +280,6 @@ function Get-AndroidDirectoryContents {
         $normalizedPath 
     }
     Write-Log "Canonical path for listing: '$listPath' (from '$normalizedPath')" "DEBUG"
-    # --- FIX ENDS HERE ---
 
     # Use the canonical path for the 'ls' command.
     $result = Invoke-AdbCommand "shell ls -la '$listPath'"
@@ -541,10 +550,8 @@ function Browse-AndroidFileSystem {
         Write-Host "📁 Browsing: $currentPath" -ForegroundColor White -BackgroundColor DarkCyan
         Write-Host "─" * 62 -ForegroundColor Gray
 
-        # --- FIX STARTS HERE (v3.5) ---
         # Cast the result to an array to prevent errors when a directory has only one item.
         $items = @(Get-AndroidDirectoryContents $currentPath)
-        # --- FIX ENDS HERE ---
         
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         $i = 1
@@ -719,6 +726,8 @@ function Show-MainMenu {
         if (-not $script:DeviceStatus.IsConnected) {
             Write-Host "`n⚠️ No device connected. Please connect a device and ensure it's recognized by ADB." -ForegroundColor Yellow
             Write-Host "   Trying to reconnect in 5 seconds..."
+            # Force a full status update on the next loop after sleeping
+            $script:LastStatusUpdateTime = [DateTime]::MinValue
             Start-Sleep -Seconds 5
             continue
         }
@@ -765,7 +774,7 @@ function Start-ADBTool {
         return
     }
 
-    Write-Log "ADB File Manager v3.5 Started" "INFO"
+    Write-Log "ADB File Manager v3.6 Started" "INFO"
     Show-MainMenu
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
