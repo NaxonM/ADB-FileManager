@@ -566,6 +566,38 @@ function Show-MainMenu {
     Write-Host "`n📝 Log file: $script:LogFile" -ForegroundColor Gray
 }
 
+# Function to show file picker dialog
+function Show-OpenFilePicker {
+    param(
+        [string]$Title = "Select a file"
+    )
+    $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $fileDialog.Title = $Title
+    if ($fileDialog.ShowDialog() -eq 'OK') {
+        return $fileDialog.FileName
+    }
+    return $null
+}
+# Function to create folder on Android
+function New-AndroidFolder {
+    Write-Host "📁 CREATE FOLDER ON ANDROID" -ForegroundColor Magenta
+    $folderPath = Read-Host -Prompt "Enter full path for new folder (e.g., /sdcard/MyFolder)"
+    if ([string]::IsNullOrWhiteSpace($folderPath)) {
+        Write-Host "❌ No path provided." -ForegroundColor Red; return
+    }
+
+    # Using the new centralized function
+    $result = Invoke-AdbCommand "shell `"mkdir -p `"$folderPath`"`""
+
+    if ($result.Success) {
+        Write-Host "✅ Successfully created folder: $folderPath" -ForegroundColor Green
+        Write-Log "Successfully created folder $folderPath" "INFO"
+    } else {
+        Write-Host "❌ Failed to create folder. Error: $($result.Output)" -ForegroundColor Red
+        # The error is already logged by Invoke-AdbCommand
+    }
+}
+
 # Main execution loop
 function Start-ADBTool {
     # Check for ADB on startup
@@ -621,38 +653,6 @@ function Start-ADBTool {
             $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
         }
     } while ($true)
-}
-
-# Function to show file picker dialog
-function Show-OpenFilePicker {
-    param(
-        [string]$Title = "Select a file"
-    )
-    $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
-    $fileDialog.Title = $Title
-    if ($fileDialog.ShowDialog() -eq 'OK') {
-        return $fileDialog.FileName
-    }
-    return $null
-}
-# Function to create folder on Android
-function New-AndroidFolder {
-    Write-Host "📁 CREATE FOLDER ON ANDROID" -ForegroundColor Magenta
-    $folderPath = Read-Host -Prompt "Enter full path for new folder (e.g., /sdcard/MyFolder)"
-    if ([string]::IsNullOrWhiteSpace($folderPath)) {
-        Write-Host "❌ No path provided." -ForegroundColor Red; return
-    }
-
-    # Using the new centralized function
-    $result = Invoke-AdbCommand "shell `"mkdir -p `"$folderPath`"`""
-
-    if ($result.Success) {
-        Write-Host "✅ Successfully created folder: $folderPath" -ForegroundColor Green
-        Write-Log "Successfully created folder $folderPath" "INFO"
-    } else {
-        Write-Host "❌ Failed to create folder. Error: $($result.Output)" -ForegroundColor Red
-        # The error is already logged by Invoke-AdbCommand
-    }
 }
 
 # Start the application
