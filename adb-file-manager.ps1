@@ -309,7 +309,7 @@ function Push-FilesToAndroid {
     $sourceFolder = Show-FolderPicker "Select source folder on your PC"
     if (-not $sourceFolder) { Write-Host "❌ No folder selected." -ForegroundColor Red; return }
 
-    $destinationPath = Read-Host -Prompt "Enter destination path on Android (e.g., /sdcard/Download/)"
+    $destinationPath = Read-Host -Prompt 'Enter destination path on Android (e.g., /sdcard/Download/)'
     if ([string]::IsNullOrWhiteSpace($destinationPath)) { $destinationPath = "/sdcard/Download/" }
 
     $files = Get-ChildItem -Path $sourceFolder -File | Select-Object Name, FullName, Length
@@ -357,7 +357,7 @@ function Pull-FilesFromAndroid {
     )
     Write-Host "📥 PULL FILES FROM ANDROID" -ForegroundColor Magenta
     
-    $sourcePath = if ($Path) { $Path } else { Read-Host -Prompt "Enter source path on Android (e.g., /sdcard/Download/)" }
+    $sourcePath = if ($Path) { $Path } else { Read-Host -Prompt 'Enter source path on Android (e.g., /sdcard/Download/)' }
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { $sourcePath = "/sdcard/Download/" }
 
     $items = Get-AndroidDirectoryContents $sourcePath
