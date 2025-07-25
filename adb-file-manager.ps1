@@ -1,8 +1,11 @@
 ﻿# ADB File Manager - PowerShell Script
 # A feature-rich tool for managing files on Android devices via ADB.
-# Version 3.6 - By Gemini
+# Version 3.7 - By Gemini
 #
 # Key Features & Improvements:
+# - NEW in v3.7: Optimized Size Calculation!
+#   - The script now uses a single 'adb' command to get the size of multiple directories.
+#   - This dramatically speeds up the confirmation step when pulling several folders at once.
 # - NEW in v3.6: Major Performance Boost!
 #   - The device status check is now cached for 15 seconds.
 #   - This eliminates redundant 'adb' commands during rapid directory navigation,
@@ -26,7 +29,6 @@ $script:DeviceStatus = @{
 }
 # Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
 $script:DirectoryCache = @{}
-# --- FIX (v3.6) ---
 # Timestamp for the last device status check to prevent excessive ADB calls.
 $script:LastStatusUpdateTime = [DateTime]::MinValue
 
@@ -74,7 +76,8 @@ function Invoke-AdbCommand {
     return [PSCustomObject]@{ Success = $success; Output  = $output.Trim() }
 }
 
-# --- FIX (v3.6) ---
+# --- Device and Caching Functions ---
+
 # OPTIMIZED to only run expensive ADB commands periodically.
 function Update-DeviceStatus {
     # If a device is connected and we checked less than 15 seconds ago, skip the check.
@@ -107,8 +110,6 @@ function Update-DeviceStatus {
     # Update the timestamp after a full check.
     $script:LastStatusUpdateTime = (Get-Date)
 }
-
-# --- Caching Functions ---
 
 # Invalidates the cache for a specific directory path.
 function Invalidate-DirectoryCache {
@@ -147,7 +148,7 @@ function Show-UIHeader {
     Clear-Host
     Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
     Write-Host "║                    🤖 ADB FILE MANAGER                     ║" -ForegroundColor Cyan
-    Write-Host "║                 v3.6 with Performance Boost                ║" -ForegroundColor Cyan
+    Write-Host "║                  v3.7 with Size Calc Boost                 ║" -ForegroundColor Cyan
     Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
 
     Update-DeviceStatus
@@ -225,17 +226,61 @@ function Show-InlineProgress {
 
 # --- File and Directory Size Calculation ---
 
-function Get-AndroidDirectorySize {
-    param([string]$ItemPath)
-    # Use single quotes for shell path
-    $sizeResult = Invoke-AdbCommand "shell du -sb '$ItemPath'"
-    if ($sizeResult.Success -and $sizeResult.Output) {
-        $sizeStr = ($sizeResult.Output -split '\s+')[0]
-        if ($sizeStr -match '^\d+$') {
-            return [long]$sizeStr
+# --- FIX (v3.7) ---
+# Gets the size of multiple Android items (files/dirs) using an optimized single command for directories.
+function Get-AndroidItemsSize {
+    param(
+        [array]$Items
+    )
+    $totalSize = 0L
+    $itemSizes = @{}
+    $dirsToQuery = @()
+
+    # Separate files and directories. Files already have their size from the 'ls' command.
+    foreach ($item in $Items) {
+        if ($item.Type -eq 'Directory') {
+            # Quote path for the shell command to handle spaces etc.
+            $dirsToQuery += "'$($item.FullPath)'"
+        } else {
+            $itemSizes[$item.FullPath] = $item.Size
+            $totalSize += $item.Size
         }
     }
-    return 0
+
+    # If there are directories, query their sizes in one single, efficient command.
+    if ($dirsToQuery.Count -gt 0) {
+        $pathsString = $dirsToQuery -join " "
+        $sizeResult = Invoke-AdbCommand "shell du -sb $pathsString"
+        if ($sizeResult.Success -and $sizeResult.Output) {
+            # The output lines look like: 5120	/sdcard/Download
+            $lines = $sizeResult.Output -split '\r?\n'
+            foreach ($line in $lines) {
+                if ($line -match '^(?<size>\d+)\s+(?<path>.+)$') {
+                    $path = $Matches.path.Trim()
+                    $size = [long]$Matches.size
+                    
+                    # Find the original item to ensure the key matches our expected FullPath format
+                    $originalItem = $Items | Where-Object { $_.FullPath -eq $path }
+                    if ($originalItem) {
+                        $itemSizes[$originalItem.FullPath] = $size
+                        $totalSize += $size
+                    } else {
+                         Write-Log "Could not match DU output path '$path' to any selected item." "WARN"
+                    }
+                }
+            }
+        }
+    }
+    
+    # Ensure every item has an entry in the hashtable, even if size calculation failed (defaults to 0).
+    foreach($item in $Items) {
+        if (-not $itemSizes.ContainsKey($item.FullPath)) {
+            $itemSizes[$item.FullPath] = 0L
+            Write-Log "Could not determine size for '$($item.FullPath)'. Defaulting to 0." "WARN"
+        }
+    }
+
+    return [PSCustomObject]@{ TotalSize = $totalSize; ItemSizes = $itemSizes }
 }
 
 function Get-LocalItemSize {
@@ -367,24 +412,16 @@ function Pull-FilesFromAndroid {
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
-    # --- Confirmation Wizard with Size Calculation ---
+    # --- FIX (v3.7): Confirmation Wizard with OPTIMIZED Size Calculation ---
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
     Write-Host "Calculating total size... Please wait." -NoNewline
-    [long]$totalSize = 0
-    $itemSizes = @{}
-    
-    foreach ($item in $itemsToPull) {
-        $itemSize = 0L
-        if ($item.Type -eq 'Directory') {
-            $itemSize = Get-AndroidDirectorySize -ItemPath $item.FullPath
-        } else {
-            $itemSize = $item.Size
-        }
-        $itemSizes[$item.FullPath] = $itemSize
-        $totalSize += $itemSize
-    }
 
-    Write-Host "`r" + (" " * 50) + "`r"
+    # New optimized way to get sizes for all selected items at once.
+    $sizeInfo = Get-AndroidItemsSize -Items $itemsToPull
+    $totalSize = $sizeInfo.TotalSize
+    $itemSizes = $sizeInfo.ItemSizes
+    
+    Write-Host "`r" + (" " * 50) + "`r" # Clear the "Calculating..." line
     Write-Host "You are about to $actionVerb $($itemsToPull.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
     $fromLocation = if ($isDir) { $sourcePath } else { $sourcePath.Substring(0, $sourcePath.LastIndexOf('/')) }
     Write-Host "From (Android): $fromLocation" -ForegroundColor Yellow
@@ -774,7 +811,7 @@ function Start-ADBTool {
         return
     }
 
-    Write-Log "ADB File Manager v3.6 Started" "INFO"
+    Write-Log "ADB File Manager v3.7 Started" "INFO"
     Show-MainMenu
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
