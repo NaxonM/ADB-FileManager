@@ -1,23 +1,34 @@
-﻿# ADB File Manager - PowerShell Script
-# A feature-rich tool for managing files on Android devices via ADB.
-# Version 3.8 - By Gemini
-#
-# Key Features & Improvements:
-# - NEW in v3.8: Smart Status Checking!
-#   - The script now intelligently detects device disconnections from command errors.
-#   - This provides instant status updates without sacrificing the performance of the time-based cache.
-# - NEW in v3.7: Optimized Size Calculation!
-#   - The script now uses a single 'adb' command to get the size of multiple directories.
-#   - This dramatically speeds up the confirmation step when pulling several folders at once.
-# - NEW in v3.6: Major Performance Boost!
-#   - The device status check is now cached for 15 seconds.
-#   - This eliminates redundant 'adb' commands during rapid directory navigation,
-#     making the file browser significantly faster and more responsive.
-# - FIX in v3.5: Path Canonicalization to correctly handle symbolic links.
-# - FIX in v3.5: Array Handling to fix "Invalid selection" bug.
-# - FIX in v3.4: Robust Progress Bar to prevent crashes.
-# - FIX in v3.3: Robust Path Handling and Caching Logic.
-# - Directory Content Caching, Optimized Transfers, ETR & Progress Bar, Confirmation Screen.
+﻿<#
+.SYNOPSIS
+    A feature-rich PowerShell script for managing files on Android devices using ADB.
+
+.DESCRIPTION
+    ADB File Manager provides a comprehensive, user-friendly command-line interface
+    for browsing, transferring, and managing files and directories on an Android device.
+
+    It is designed for efficiency and reliability, incorporating features like content
+    caching, optimized bulk transfers, and a real-time status checker that intelligently
+    detects device disconnections.
+
+.FEATURES
+    - Interactive File Browser: Navigate the device filesystem, with options to create,
+      rename, and delete files/folders.
+    - Optimized Transfers: Efficiently pull/push multiple items at once. Directory sizes
+      are calculated in a single, optimized command to speed up confirmations.
+    - Smart Status & Caching: A 15-second device status cache minimizes redundant ADB
+      calls, making browsing significantly faster. The script also intelligently detects
+      disconnections from command errors for instant feedback.
+    - Detailed Progress Bar: Monitor 'pull' operations with a detailed progress bar
+      showing speed, percentage, ETR, and total size.
+    - GUI Pickers: Uses familiar Windows dialogs for selecting local files and folders.
+    - Robust Error Handling: Built to handle common ADB errors and pathing issues gracefully.
+    - Logging: All major operations are logged to a timestamped file for easy debugging.
+
+.VERSION
+    4.2.0
+#>
+
+#Requires -Version 5.1
 
 # Load required assemblies for GUI pickers
 Add-Type -AssemblyName System.Windows.Forms
@@ -70,8 +81,7 @@ function Invoke-AdbCommand {
 
     if (-not $success) {
         Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR"
-        # --- ELEGANT STATUS CHECK (v3.8) ---
-        # If a command fails, check if it's due to a disconnection.
+        # Smart Status Check: If a command fails, check if it's due to a disconnection.
         # This makes the script instantly aware of a disconnected device without constant polling.
         if ($output -match "device not found|device offline|no devices/emulators found") {
             Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
@@ -159,12 +169,23 @@ function Invalidate-ParentCache {
 # --- UI and Utility Functions ---
 
 function Show-UIHeader {
+    param(
+        [string]$Title = "ADB FILE MANAGER",
+        [string]$SubTitle
+    )
     Clear-Host
-    Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║                    🤖 ADB FILE MANAGER                     ║" -ForegroundColor Cyan
-    Write-Host "║                  v3.8 with Smart Status                  ║" -ForegroundColor Cyan
-    Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-
+    $width = 62
+    Write-Host ("╔" + ("═" * ($width - 2)) + "╗") -ForegroundColor Cyan
+    Write-Host ("║" + (" " * ($width - 2)) + "║") -ForegroundColor Cyan
+    $titlePadding = [math]::Floor(($width - 2 - $Title.Length) / 2)
+    Write-Host ("║" + (" " * $titlePadding) + $Title + (" " * ($width - 2 - $Title.Length - $titlePadding)) + "║") -ForegroundColor White
+    if ($SubTitle) {
+        $subtitlePadding = [math]::Floor(($width - 2 - $SubTitle.Length) / 2)
+        Write-Host ("║" + (" " * $subtitlePadding) + $SubTitle + (" " * ($width - 2 - $SubTitle.Length - $subtitlePadding)) + "║") -ForegroundColor Gray
+    }
+    Write-Host ("║" + (" " * ($width - 2)) + "║") -ForegroundColor Cyan
+    Write-Host ("╚" + ("═" * ($width - 2)) + "╝") -ForegroundColor Cyan
+    
     Update-DeviceStatus
     $statusText = "🔌 Status: "
     if ($script:DeviceStatus.IsConnected) {
@@ -172,7 +193,7 @@ function Show-UIHeader {
     } else {
         Write-Host "$statusText Disconnected - Please connect a device." -ForegroundColor Red
     }
-    Write-Host "═" * 62 -ForegroundColor Gray
+    Write-Host ("─" * $width) -ForegroundColor Gray
 }
 
 function Format-Bytes {
@@ -213,27 +234,24 @@ function Show-InlineProgress {
     $barWidth = 25
     
     $displayPercent = $percent
+    
+    # FIX: Replaced [System.Math]::Clamp for better PowerShell compatibility.
     $cappedPercent = $percent
     if ($cappedPercent -gt 100) { $cappedPercent = 100 }
     if ($cappedPercent -lt 0) { $cappedPercent = 0 }
 
     $completedWidth = [math]::Floor($barWidth * $cappedPercent / 100)
     $remainingWidth = $barWidth - $completedWidth
-    if ($remainingWidth -lt 0) { $remainingWidth = 0 }
     
-    $remainingSpaces = $remainingWidth - 1
-    if ($remainingSpaces -lt 0) { $remainingSpaces = 0 }
-    $progressBar = ("=" * $completedWidth) + ">" + (" " * $remainingSpaces)
-
-    if ($completedWidth -ge $barWidth) {
-        $progressBar = "=" * $barWidth
-    }
+    $progressBarChar = "■"
+    $progressBar = ($progressBarChar * $completedWidth) + ("-" * $remainingWidth)
 
     $speedText = "$(Format-Bytes $speed)/s"
     $sizeText = "{0} / {1}" -f (Format-Bytes $CurrentValue), (Format-Bytes $TotalValue)
     $etrText = if ($etrSeconds -gt 0 -and $etrSeconds -lt 86400) { [timespan]::FromSeconds($etrSeconds).ToString("hh\:mm\:ss") } else { "--:--:--" }
 
-    $progressLine = "`r{0,-20} [{1}] {2,3}% | {3,22} | {4,12} | ETR: {5}" -f $Activity.Substring(0, [System.Math]::Min($Activity.Length, 20)), $progressBar, $displayPercent, $sizeText, $speedText, $etrText
+    $activityString = $Activity.PadRight(20).Substring(0, 20)
+    $progressLine = "`r{0} [{1}] {2,3}% | {3,22} | {4,12} | ETR: {5}" -f $activityString, $progressBar, $displayPercent, $sizeText, $speedText, $etrText
     Write-Host $progressLine -NoNewline
 }
 
@@ -356,7 +374,7 @@ function Get-AndroidDirectoryContents {
             $name = $Matches.name
             $type = if ($Matches.perms.StartsWith('d')) { "Directory" } elseif ($Matches.perms.StartsWith('l')) { "Link" } else { "File" }
             
-            if ($name -eq "." -or $name -eq "..") { continue }
+            if ($name -in ".", "..") { continue }
             
             $size = 0L
             if ($type -eq 'File' -and -not [string]::IsNullOrEmpty($Matches.size)) {
@@ -389,7 +407,7 @@ function Pull-FilesFromAndroid {
     $actionVerb = if ($Move) { "MOVE" } else { "PULL" }
     Write-Host "`n📥 $actionVerb FROM ANDROID" -ForegroundColor Magenta
     
-    $sourcePath = if ($Path) { $Path } else { Read-Host "➡️ Enter source path on Android to pull from (e.g., /sdcard/Download/)" }
+    $sourcePath = if ($Path) { $Path } else { Read-Host "➡️  Enter source path on Android to pull from (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return }
 
     # Use single quotes for shell path
@@ -398,15 +416,20 @@ function Pull-FilesFromAndroid {
 
     $itemsToPull = @()
     if ($isDir) {
-        $allItems = @(Get-AndroidDirectoryContents $sourcePath) # Cast to array
+        # Cast to array to prevent errors when a directory has only one item.
+        $allItems = @(Get-AndroidDirectoryContents $sourcePath)
         if ($allItems.Count -eq 0) { Write-Host "🟡 Directory is empty or inaccessible." -ForegroundColor Yellow; return }
         
         Write-Host "`nItems available in '$($sourcePath)':" -ForegroundColor Cyan
         for ($i = 0; $i -lt $allItems.Count; $i++) {
-            $icon = if ($allItems[$i].Type -eq "Directory") { "📁" } elseif ($allItems[$i].Type -eq "File") { "📄" } else { "🔗" }
+            $icon = switch ($allItems[$i].Type) {
+                "Directory" { "📁" }
+                "File"      { "📄" }
+                default     { "🔗" }
+            }
             Write-Host (" [{0,2}] {1} {2}" -f ($i+1), $icon, $allItems[$i].Name)
         }
-        $selectionStr = Read-Host "`n➡️ Enter item numbers to pull (e.g., 1,3,5 or 'all')"
+        $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1,3,5 or 'all')"
         if ($selectionStr -eq 'all') { $itemsToPull = $allItems } 
         elseif ($selectionStr) {
             $selectedIndices = $selectionStr -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ - 1 }
@@ -439,7 +462,7 @@ function Pull-FilesFromAndroid {
     $fromLocation = if ($isDir) { $sourcePath } else { $sourcePath.Substring(0, $sourcePath.LastIndexOf('/')) }
     Write-Host "From (Android): $fromLocation" -ForegroundColor Yellow
     Write-Host "To   (PC)    : $destinationFolder" -ForegroundColor Yellow
-    $confirm = Read-Host "➡️ Press Enter to begin, or type 'n' to cancel"
+    $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
     $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
@@ -450,7 +473,8 @@ function Pull-FilesFromAndroid {
         $destPathOnPC = Join-Path $destinationFolder $item.Name
         $itemTotalSize = $itemSizes[$item.FullPath]
         
-        $adbCommand = { param($source, $dest) adb pull $source $dest 2>&1 }
+        # Pipe to Out-String to prevent PowerShell from formatting stderr as an error object
+        $adbCommand = { param($source, $dest) adb pull $source $dest 2>&1 | Out-String }
         $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destinationFolder)
         
         $itemStartTime = Get-Date
@@ -467,7 +491,7 @@ function Pull-FilesFromAndroid {
         Write-Host ""
 
         $resultOutput = Receive-Job $job
-        $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'No such file or directory' -and $resultOutput -notmatch 'error:')
+        $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'No such file or directory|error:')
         Remove-Job $job
         
         if ($success) {
@@ -482,7 +506,6 @@ function Pull-FilesFromAndroid {
                 $deleteResult = Invoke-AdbCommand "shell rm -rf '$($item.FullPath)'"
                 if ($deleteResult.Success) {
                     Write-Host " ✅" -ForegroundColor Green
-                    # Use new cache invalidation
                     Invalidate-ParentCache -ItemPath $item.FullPath
                 } else { Write-Host " ❌ (Failed to delete)" -ForegroundColor Red }
             }
@@ -521,7 +544,7 @@ function Push-FilesToAndroid {
     if ($sourceItems.Count -eq 0) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return }
 
     $destPathFinal = if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath } 
-    else { Read-Host "➡️ Enter destination path on Android (e.g., /sdcard/Download/)" }
+    else { Read-Host "➡️  Enter destination path on Android (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($destPathFinal)) { Write-Host "🟡 Action cancelled."; return }
 
     # --- Confirmation Wizard with Size Calculation ---
@@ -536,7 +559,7 @@ function Push-FilesToAndroid {
     Write-Host "From (PC)    : $(Split-Path $sourceItems[0] -Parent)" -ForegroundColor Yellow
     Write-Host "To   (Android): $destPathFinal" -ForegroundColor Yellow
     Write-Host "NOTE: ADB push does not support a detailed progress bar." -ForegroundColor DarkGray
-    $confirm = Read-Host "➡️ Press Enter to begin, or type 'n' to cancel"
+    $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
     $successCount = 0; $failureCount = 0
@@ -545,7 +568,8 @@ function Push-FilesToAndroid {
         $sourceItemSafe = """$($itemInfo.FullName)"""
         $destPathSafe = """$destPathFinal"""
         
-        $adbCommand = { param($source, $dest) adb push $source $dest 2>&1 }
+        # Pipe to Out-String to prevent PowerShell from formatting stderr as an error object
+        $adbCommand = { param($source, $dest) adb push $source $dest 2>&1 | Out-String }
         $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe)
 
         $spinner = @('|', '/', '-', '\')
@@ -568,7 +592,6 @@ function Push-FilesToAndroid {
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
             Write-Host ($resultOutput | Out-String).Trim() -ForegroundColor Gray
 
-            # Use new cache invalidation
             Invalidate-DirectoryCache -DirectoryPath $destPathFinal
 
             if ($Move) {
@@ -592,28 +615,36 @@ function Push-FilesToAndroid {
 # --- Other File System Functions ---
 
 function Browse-AndroidFileSystem {
-    $currentPath = Read-Host "➡️ Enter starting path (default: /sdcard/)"
+    $currentPath = Read-Host "➡️  Enter starting path (default: /sdcard/)"
     if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "/sdcard/" }
 
     do {
-        Show-UIHeader
+        Show-UIHeader -Title "FILE BROWSER"
         Write-Host "📁 Browsing: $currentPath" -ForegroundColor White -BackgroundColor DarkCyan
-        Write-Host "─" * 62 -ForegroundColor Gray
+        Write-Host ("─" * 62) -ForegroundColor Gray
 
         # Cast the result to an array to prevent errors when a directory has only one item.
         $items = @(Get-AndroidDirectoryContents $currentPath)
         
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
-        $i = 1
-        foreach ($item in $items) {
-            # Added a 'Link' icon for completeness
-            $icon = if ($item.Type -eq "Directory") { "📁" } elseif ($item.Type -eq "File") { "📄" } else { "🔗" }
-            $color = if ($item.Type -eq "Directory") { "Cyan" } elseif ($item.Type -eq "Link") { "Yellow" } else { "White" }
-            Write-Host (" [{0,2}] {1} {2}" -f $i, $icon, $item.Name) -ForegroundColor $color
-            $i++
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            $item = $items[$i]
+            $icon = switch ($item.Type) {
+                "Directory" { "📁" }
+                "File"      { "📄" }
+                default     { "🔗" }
+            }
+            $color = switch ($item.Type) {
+                "Directory" { "Cyan" }
+                "Link"      { "Yellow" }
+                default     { "White" }
+            }
+            Write-Host (" [{0,2}] {1} {2}" -f ($i + 1), $icon, $item.Name) -ForegroundColor $color
         }
         
-        $choice = Read-Host "`n➡️ Enter number to browse, (c)reate, (p)ull, (u)pload, (r)efresh, or (q)uit to menu"
+        Write-Host ("─" * 62) -ForegroundColor Gray
+        Write-Host "Actions: (c)reate, (p)ull, (u)pload, (r)efresh, (q)uit to menu" -ForegroundColor Gray
+        $choice = Read-Host "`n➡️  Enter number to browse, or select an action"
 
         switch ($choice) {
             "q" { return }
@@ -622,7 +653,6 @@ function Browse-AndroidFileSystem {
             "u" { Push-FilesToAndroid -DestinationPath $currentPath; Read-Host "`nPress Enter to continue..." }
             "r" {
                 Write-Host "`n🔄 Refreshing directory..." -ForegroundColor Yellow
-                # Use new cache invalidation
                 Invalidate-DirectoryCache -DirectoryPath $currentPath
                 Start-Sleep -Seconds 1
             }
@@ -643,7 +673,8 @@ function Browse-AndroidFileSystem {
                 if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $items.Count) {
                     $selectedIndex = [int]$choice - 1
                     $selectedItem = $items[$selectedIndex]
-                    if ($selectedItem.Type -eq "Directory" -or $selectedItem.Type -eq "Link") { # Allow browsing into links
+                    # Allow browsing into directories and links
+                    if ($selectedItem.Type -in "Directory", "Link") {
                         $currentPath = $selectedItem.FullPath 
                     } else { 
                         Show-ItemActionMenu -Item $selectedItem 
@@ -658,14 +689,13 @@ function Browse-AndroidFileSystem {
 
 function New-AndroidFolder {
     param([string]$ParentPath)
-    $folderName = Read-Host "➡️ Enter name for the new folder"
+    $folderName = Read-Host "➡️  Enter name for the new folder"
     if ([string]::IsNullOrWhiteSpace($folderName)) { Write-Host "🟡 Action cancelled: No name provided." -ForegroundColor Yellow; return }
     $fullPath = if ($ParentPath.EndsWith('/')) { "$ParentPath$folderName" } else { "$ParentPath/$folderName" }
     # Use single quotes for shell path
     $result = Invoke-AdbCommand "shell mkdir -p '$fullPath'"
     if ($result.Success) {
         Write-Host "✅ Successfully created folder: $fullPath" -ForegroundColor Green
-        # Use new cache invalidation
         Invalidate-ParentCache -ItemPath $fullPath
     } 
     else { Write-Host "❌ Failed to create folder. Error: $($result.Output)" -ForegroundColor Red }
@@ -674,15 +704,15 @@ function New-AndroidFolder {
 function Show-ItemActionMenu {
     param($Item)
     while ($true) {
-        Show-UIHeader
+        Show-UIHeader -Title "ITEM ACTIONS"
         Write-Host "Selected Item: $($Item.FullPath)" -ForegroundColor White -BackgroundColor DarkMagenta
         Write-Host "---------------------------------"
-        Write-Host "1. Pull to PC (Copy)"
-        Write-Host "2. Move to PC (Pull + Delete)"
-        Write-Host "3. Rename (on device)"
-        Write-Host "4. Delete (on device)"
-        Write-Host "5. Back to browser"
-        $action = Read-Host "`n➡️ Enter your choice (1-5)"
+        Write-Host " 1. Pull to PC (Copy)"
+        Write-Host " 2. Move to PC (Pull + Delete)"
+        Write-Host " 3. Rename (on device)"
+        Write-Host " 4. Delete (on device)"
+        Write-Host " 5. Back to browser"
+        $action = Read-Host "`n➡️  Enter your choice (1-5)"
         switch ($action) {
             "1" { Pull-FilesFromAndroid -Path $Item.FullPath; Read-Host "`nPress Enter to continue..."; break }
             "2" { Pull-FilesFromAndroid -Path $Item.FullPath -Move; Read-Host "`nPress Enter to continue..."; break }
@@ -711,7 +741,6 @@ function Remove-AndroidItem {
     $result = Invoke-AdbCommand "shell rm -rf '$ItemPath'"
     if ($result.Success) {
         Write-Host "✅ Successfully deleted '$itemName'." -ForegroundColor Green
-        # Use new cache invalidation
         Invalidate-ParentCache -ItemPath $ItemPath
     } 
     else { Write-Host "❌ Failed to delete '$itemName'. Error: $($result.Output)" -ForegroundColor Red }
@@ -720,7 +749,7 @@ function Remove-AndroidItem {
 function Rename-AndroidItem {
     param([string]$ItemPath)
     $itemName = $ItemPath.Split('/')[-1]
-    $newName = Read-Host "➡️ Enter the new name for '$itemName'"
+    $newName = Read-Host "➡️  Enter the new name for '$itemName'"
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Contains('/') -or $newName.Contains('\')) {
         Write-Host "❌ Invalid name." -ForegroundColor Red; return
     }
@@ -731,7 +760,7 @@ function Rename-AndroidItem {
     $result = Invoke-AdbCommand "shell mv '$ItemPath' '$newItemPath'"
     if ($result.Success) {
         Write-Host "✅ Successfully renamed to '$newName'." -ForegroundColor Green
-        # Use new cache invalidation (invalidate the old item's parent directory)
+        # Invalidate the old item's parent directory to refresh the browser view
         Invalidate-ParentCache -ItemPath $ItemPath 
     } else {
         Write-Host "❌ Failed to rename. Error: $($result.Output)" -ForegroundColor Red
@@ -771,7 +800,7 @@ function Show-OpenFilePicker {
 
 function Show-MainMenu {
     while ($true) {
-        Show-UIHeader
+        Show-UIHeader -SubTitle "MAIN MENU"
 
         if (-not $script:DeviceStatus.IsConnected) {
             Write-Host "`n⚠️ No device connected. Please connect a device and ensure it's recognized by ADB." -ForegroundColor Yellow
@@ -782,14 +811,15 @@ function Show-MainMenu {
             continue
         }
 
-        Write-Host "`nMAIN MENU" -ForegroundColor Green
-        Write-Host "══════════════════════════════════════════════════════════════"
-        Write-Host "1. Browse Device Filesystem (Interactive Push/Pull/Manage)"
-        Write-Host "2. Quick Push (from PC to a specified device path)"
-        Write-Host "3. Quick Pull (from a specified device path to PC)"
-        Write-Host "q. Exit"
+        Write-Host ""
+        Write-Host " 1. Browse Device Filesystem (Interactive Push/Pull/Manage)"
+        Write-Host " 2. Quick Push (from PC to a specified device path)"
+        Write-Host " 3. Quick Pull (from a specified device path to PC)"
+        Write-Host ""
+        Write-Host " Q. Exit"
+        Write-Host ""
 
-        $choice = Read-Host "`n➡️ Enter your choice"
+        $choice = Read-Host "➡️  Enter your choice"
 
         if ($choice -in '1', '2', '3' -and -not $script:DeviceStatus.IsConnected) {
             Write-Host "`n❌ Cannot perform this action: No device connected." -ForegroundColor Red
@@ -824,7 +854,7 @@ function Start-ADBTool {
         return
     }
 
-    Write-Log "ADB File Manager v3.8 Started" "INFO"
+    Write-Log "ADB File Manager v4.2.0 Started" "INFO"
     Show-MainMenu
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
