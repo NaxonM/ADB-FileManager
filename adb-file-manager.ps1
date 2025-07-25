@@ -569,7 +569,11 @@ function Push-FilesToAndroid {
         $destPathSafe = """$destPathFinal"""
         
         # Pipe to Out-String to prevent PowerShell from formatting stderr as an error object
-        $adbCommand = { param($source, $dest) adb push $source $dest 2>&1 | Out-String }
+        $adbCommand = { 
+        param($source, $dest) 
+        # Wrap in cmd /c to make stderr redirection more robust against PowerShell's error formatting
+        cmd.exe /c "adb push `"$source`" `"$dest`" 2>&1" | Out-String 
+                       }
         $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe)
 
         $spinner = @('|', '/', '-', '\')
