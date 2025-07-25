@@ -650,7 +650,7 @@ function Start-ADBTool {
         
         if ($choice -in "1", "2", "3", "4", "5", "6", "7", "8", "9") {
             Write-Host "`nPress Enter to return to the menu..." -ForegroundColor Yellow
-            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
         }
     } while ($true)
 }
