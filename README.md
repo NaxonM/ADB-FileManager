@@ -1,42 +1,62 @@
-# ADB File Manager (Enhanced PowerShell Edition)
+# ADB File Manager for PowerShell
 
-This PowerShell script provides a powerful, user-friendly command-line interface for managing files on an Android device via ADB (Android Debug Bridge). It's designed to be a significant improvement over the standard `adb push` and `adb pull` commands, with a focus on usability, safety, and a rich feature set.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/user-attachments/assets/ddc52e5a-f111-4d37-8898-316812eb0482" alt="ADB File Manager Screenshot" width="750">
+</p>
 
-## Features
+<p align="center">
+  A powerful, efficient, and user-friendly command-line interface for managing files on your Android device, built with PowerShell.
+</p>
 
-*   **Interactive File Browser:** Navigate your Android device's file system with a user-friendly grid view.
-*   **Device Status Bar:** Always know if your device is connected and see its model name at a glance.
-*   **Robust File Operations:**
-    *   **Push/Pull:** Transfer files and folders between your PC and Android device with detailed progress bars, including transfer speed and ETA for pull operations.
-    *   **Move:** Move files between your PC and Android device (push/pull + delete).
-    *   **Copy/Move (Intra-device):** Copy and move files and folders within your Android device's storage.
-    *   **Delete:** Remove files and folders with a confirmation prompt to prevent accidents.
-    *   **Rename:** Rename files and folders directly on the device.
-    *   **Create Directory:** Make new folders on your device or on your local PC.
-*   **App Management:**
-    *   **Install APK:** Easily install Android packages (APKs) from your PC.
-    *   **List Apps:** Get a list of all installed applications on your device.
-*   **Comprehensive Logging:** All operations are logged to a timestamped file for easy debugging.
-*   **Error Handling:** Centralized error handling provides clear feedback.
-*   **Support for Special Characters:** Handles file and folder names with spaces.
+---
+
+## Why Use ADB File Manager?
+
+Tired of the clunky `adb push` and `adb pull` commands? This ADB File Manager enhances your workflow with a rich, interactive terminal experience. It's designed for both power users and those who want a safer, more intuitive way to handle file transfers and management without ever leaving the console.
+
+It's faster, smarter, and provides far more feedback than standard ADB commands.
+
+## Core Features
+
+* **💻 Interactive File Browser**: Navigate your device's filesystem with ease. The intuitive interface allows you to browse directories, select items, and perform actions without typing complex paths.
+* **🚀 Efficient & Optimized Transfers**:
+    * **Blazing Fast Pulls**: A detailed progress bar shows transfer speed, ETA, percentage, and total size.
+    * **Optimized Size Calculation**: Calculates the total size of multiple folders in a single, efficient ADB command, making transfer confirmations significantly faster.
+    * **Move Operations**: Transfer files and folders from your device and automatically delete the source, all in one go.
+* **⚡ Performance & Reliability**:
+    * **Smart Caching**: Directory contents are cached to make browsing incredibly fast and responsive. A manual refresh option gives you full control.
+    * **Intelligent Status Detection**: The script instantly detects if a device is disconnected during an operation, providing immediate feedback without constant, slow polling.
+* **🗂️ On-Device File Management**:
+    * Create new folders.
+    * Rename files and folders.
+    * Delete items with a safety confirmation prompt.
+* **✨ User-Friendly Interface**:
+    * **GUI Pickers**: Uses the familiar Windows dialogs for selecting local files and folders to push or as a destination for pulls.
+    * **Clean UI**: A polished and clean header shows the connected device status at all times.
+    * **Detailed Logging**: All major operations are logged to a timestamped file for easy debugging.
 
 ## Prerequisites
 
-*   **PowerShell:** The script is designed to run in a PowerShell environment.
-*   **Android SDK Platform Tools (ADB):** You must have `adb.exe` in your system's PATH. You can download the platform tools from the official [Android developer website](https://developer.android.com/studio/releases/platform-tools).
+1.  **PowerShell 5.1+**: Comes standard with Windows 10 and later.
+2.  **Android SDK Platform Tools (ADB)**: You must have `adb.exe` available in your system's PATH. You can download the latest version from the [official Android developer website](https://developer.android.com/studio/releases/platform-tools).
 
-## How to Use
+## Getting Started
 
-1.  **Save the Script:** Save the `adb-file-manager.ps1` script to a location on your computer.
-2.  **Enable USB Debugging:** On your Android device, enable Developer Options and then enable USB Debugging.
-3.  **Connect Your Device:** Connect your Android device to your PC via a USB cable.
-4.  **Run the Script:**
-    *   Open a PowerShell terminal.
-    *   Navigate to the directory where you saved the script.
-    *   Run the script by typing: `.\adb-file-manager.ps1`
-
-5.  **Use the Menu:** The script will present you with a menu of options. Simply type the number corresponding to the action you want to perform and press Enter. The most powerful features are in the interactive file browser (option 3).
+1.  **Enable USB Debugging**: On your Android device, go to `Settings` > `About phone`, tap `Build number` seven times to enable Developer Options. Then, go to `Developer options` and enable `USB debugging`.
+2.  **Connect Your Device**: Connect your Android device to your PC with a USB cable. Authorize the connection on your device if prompted.
+3.  **Run the Script**:
+    * Download the `adb-file-manager.ps1` script.
+    * Open a PowerShell terminal.
+    * If this is your first time running a local script, you may need to set the execution policy. Run PowerShell as Administrator and execute:
+        ```powershell
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+        ```
+    * Navigate to the directory where you saved the script and run it:
+        ```powershell
+        .\adb-file-manager.ps1
+        ```
+4.  **Use the Menu**: The script will guide you through the available options. The most powerful features are in the **Browse Device Filesystem** menu.
 
 ## Disclaimer
 
-This script executes powerful ADB commands, including file deletion. While it includes safeguards like confirmation prompts, you are responsible for the actions you perform. Always double-check paths and be careful when deleting files.
+This script executes powerful ADB commands, including file deletion. While it includes safeguards like confirmation prompts, you are responsible for the actions you perform. Always double-check paths and be careful when deleting files. The author is not responsible for any data loss.
