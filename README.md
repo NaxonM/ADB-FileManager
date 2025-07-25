@@ -1,6 +1,6 @@
 # ADB File Manager for PowerShell
 
-<div align="center"><img src="https://raw.githubusercontent.com/NaxonM/ADB-FileManager/main/screenshot.PNG" width="750"></div>
+<div align="center"><img src="https://raw.githubusercontent.com/NaxonM/ADB-FileManager/main/screenshot.png" width="750"></div>
 
 <p align="center">
   A powerful, efficient, and user-friendly command-line interface for managing files on your Android device, built with PowerShell.
