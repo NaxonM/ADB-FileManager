@@ -533,13 +533,21 @@ function Pull-FilesFromAndroid {
         
         $itemStartTime = Get-Date
         Write-Host ""
-        
-        while ($job.State -eq 'Running') {
-            $currentSize = Get-LocalItemSize -ItemPath $destPathOnPC
-            Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
-            Start-Sleep -Milliseconds 250
+
+        $jobStart = Get-Date
+        $startTimeout = [TimeSpan]::FromSeconds(5)
+        if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+            while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                if ($job.State -eq 'NotStarted') {
+                    if ((Get-Date) - $jobStart -gt $startTimeout) { break }
+                } else {
+                    $currentSize = Get-LocalItemSize -ItemPath $destPathOnPC
+                    Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+                }
+                Start-Sleep -Milliseconds 250
+            }
         }
-        
+
         $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
         Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
         Write-Host ""
@@ -638,11 +646,20 @@ function Push-FilesToAndroid {
         $spinner = @('|', '/', '-', '\')
         $spinnerIndex = 0
         Write-Host ""
-        while ($job.State -eq 'Running') {
-            $status = "Pushing $($itemInfo.Name)... $($spinner[$spinnerIndex])"
-            Write-Host "`r$status" -NoNewline
-            $spinnerIndex = ($spinnerIndex + 1) % $spinner.Length
-            Start-Sleep -Milliseconds 150
+        $jobStart = Get-Date
+        $startTimeout = [TimeSpan]::FromSeconds(5)
+        $status = ""
+        if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+            while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                if ($job.State -eq 'NotStarted') {
+                    if ((Get-Date) - $jobStart -gt $startTimeout) { break }
+                } else {
+                    $status = "Pushing $($itemInfo.Name)... $($spinner[$spinnerIndex])"
+                    Write-Host "`r$status" -NoNewline
+                    $spinnerIndex = ($spinnerIndex + 1) % $spinner.Length
+                }
+                Start-Sleep -Milliseconds 150
+            }
         }
         Write-Host "`r" + (" " * ($status.Length + 5)) + "`r"
 
