@@ -156,6 +156,10 @@ function Invalidate-DirectoryCache {
 # Gets the parent of an item and invalidates its cache.
 function Invalidate-ParentCache {
      param([string]$ItemPath)
+    if (-not (Test-AndroidPath $ItemPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
      # Normalize to forward slashes and remove any trailing slash
     $normalizedItemPath = $ItemPath.Replace('\', '/').TrimEnd('/')
     if ([string]::IsNullOrEmpty($normalizedItemPath) -or $normalizedItemPath -eq "/") { return }
@@ -168,6 +172,27 @@ function Invalidate-ParentCache {
         $parentPath = $normalizedItemPath.Substring(0, $lastSlashIndex)
         Invalidate-DirectoryCache -DirectoryPath $parentPath
     }
+}
+
+# Validates Android paths to prevent command injection
+function Test-AndroidPath {
+    param([string]$Path)
+    $invalidChars = @(
+        [char]38,  # &
+        [char]124, # |
+        [char]96,  # `
+        [char]36,  # $
+        [char]40,  # (
+        [char]41,  # )
+        [char]39   # '
+    )
+    foreach ($ch in $invalidChars) {
+        if ($Path -and $Path.Contains($ch)) {
+            Write-Host "❌ Path contains invalid character '$ch'." -ForegroundColor Red
+            return $false
+        }
+    }
+    return $true
 }
 
 # --- UI and Utility Functions ---
@@ -273,6 +298,10 @@ function Get-AndroidItemsSize {
 
     # Separate files and directories. Files already have their size from the 'ls' command.
     foreach ($item in $Items) {
+        if (-not (Test-AndroidPath $item.FullPath)) {
+            Write-Log "Skipping item with unsafe path: $($item.FullPath)" "WARN"
+            continue
+        }
         if ($item.Type -eq 'Directory') {
             # Quote path for the shell command to handle spaces etc.
             $dirsToQuery += "'$($item.FullPath)'"
@@ -281,6 +310,7 @@ function Get-AndroidItemsSize {
             $totalSize += $item.Size
         }
     }
+
 
     # If there are directories, query their sizes in one single, efficient command.
     if ($dirsToQuery.Count -gt 0) {
@@ -344,6 +374,10 @@ function Get-AndroidDirectoryContents {
     # Normalize path for cache key consistency
     $normalizedPath = $Path.Replace('\', '/').TrimEnd('/')
     if ([string]::IsNullOrEmpty($normalizedPath)) { $normalizedPath = "/" }
+    if (-not (Test-AndroidPath $normalizedPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return @()
+    }
 
     # Check cache first
     if ($script:DirectoryCache.ContainsKey($normalizedPath)) {
@@ -358,6 +392,10 @@ function Get-AndroidDirectoryContents {
         $canonicalResult.Output.Trim()
     } else { 
         $normalizedPath 
+    }
+    if (-not (Test-AndroidPath $listPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return @()
     }
     Write-Log "Canonical path for listing: '$listPath' (from '$normalizedPath')" "DEBUG"
 
@@ -387,6 +425,10 @@ function Get-AndroidDirectoryContents {
             
             # Always join with the original path for user context, not the canonical one
             $fullPath = if ($normalizedPath.EndsWith('/')) { "$normalizedPath$name" } else { "$normalizedPath/$name" }
+            if (-not (Test-AndroidPath $fullPath)) {
+                Write-Log "Skipping item with unsafe path: $fullPath" "WARN"
+                continue
+            }
 
             $items += [PSCustomObject]@{
                 Name        = $name.Trim()
@@ -413,6 +455,11 @@ function Pull-FilesFromAndroid {
     
     $sourcePath = if ($Path) { $Path } else { Read-Host "➡️  Enter source path on Android to pull from (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return }
+    if (-not (Test-AndroidPath $sourcePath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
+
 
     # Use single quotes for shell path
     $sourceIsDirResult = Invoke-AdbCommand "shell ls -ld '$sourcePath'"
@@ -468,11 +515,14 @@ function Pull-FilesFromAndroid {
     Write-Host "To   (PC)    : $destinationFolder" -ForegroundColor Yellow
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
-
     $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
     $overallStartTime = Get-Date
 
     foreach ($item in $itemsToPull) {
+        if (-not (Test-AndroidPath $item.FullPath)) {
+            Write-Host "❌ Skipping '$($item.Name)' due to invalid path." -ForegroundColor Red
+            continue
+        }
         $sourceItemSafe = """$($item.FullPath)"""
         $destPathOnPC = Join-Path $destinationFolder $item.Name
         $itemTotalSize = $itemSizes[$item.FullPath]
@@ -550,6 +600,11 @@ function Push-FilesToAndroid {
     $destPathFinal = if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath } 
     else { Read-Host "➡️  Enter destination path on Android (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($destPathFinal)) { Write-Host "🟡 Action cancelled."; return }
+    if (-not (Test-AndroidPath $destPathFinal)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
+
 
     # --- Confirmation Wizard with Size Calculation ---
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
@@ -625,6 +680,11 @@ function Push-FilesToAndroid {
 function Browse-AndroidFileSystem {
     $currentPath = Read-Host "➡️  Enter starting path (default: /sdcard/)"
     if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "/sdcard/" }
+    if (-not (Test-AndroidPath $currentPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
+
 
     do {
         Show-UIHeader -Title "FILE BROWSER"
@@ -683,7 +743,12 @@ function Browse-AndroidFileSystem {
                     $selectedItem = $items[$selectedIndex]
                     # Allow browsing into directories and links
                     if ($selectedItem.Type -in "Directory", "Link") {
-                        $currentPath = $selectedItem.FullPath 
+                        if (Test-AndroidPath $selectedItem.FullPath) {
+                            $currentPath = $selectedItem.FullPath
+                        } else {
+                            Write-Host "❌ Invalid path." -ForegroundColor Red
+                            Start-Sleep -Seconds 1
+                        }
                     } else { 
                         Show-ItemActionMenu -Item $selectedItem 
                     }
@@ -700,6 +765,10 @@ function New-AndroidFolder {
     $folderName = Read-Host "➡️  Enter name for the new folder"
     if ([string]::IsNullOrWhiteSpace($folderName)) { Write-Host "🟡 Action cancelled: No name provided." -ForegroundColor Yellow; return }
     $fullPath = if ($ParentPath.EndsWith('/')) { "$ParentPath$folderName" } else { "$ParentPath/$folderName" }
+    if (-not (Test-AndroidPath $fullPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
     # Use single quotes for shell path
     $result = Invoke-AdbCommand "shell mkdir -p '$fullPath'"
     if ($result.Success) {
@@ -742,6 +811,10 @@ function Show-ItemActionMenu {
 
 function Remove-AndroidItem {
     param([string]$ItemPath)
+    if (-not (Test-AndroidPath $ItemPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
     $itemName = $ItemPath.Split('/')[-1]
     $confirmation = Read-Host "❓ Are you sure you want to PERMANENTLY DELETE '$itemName'? [y/N]"
     if ($confirmation.ToLower() -ne 'y') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return }
@@ -756,6 +829,10 @@ function Remove-AndroidItem {
 
 function Rename-AndroidItem {
     param([string]$ItemPath)
+    if (-not (Test-AndroidPath $ItemPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
     $itemName = $ItemPath.Split('/')[-1]
     $newName = Read-Host "➡️  Enter the new name for '$itemName'"
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Contains('/') -or $newName.Contains('\')) {
@@ -763,6 +840,10 @@ function Rename-AndroidItem {
     }
     $parentPath = $ItemPath.Substring(0, $ItemPath.LastIndexOf('/'))
     $newItemPath = if ([string]::IsNullOrEmpty($parentPath)) { "/$newName" } else { "$parentPath/$newName" }
+    if (-not (Test-AndroidPath $newItemPath)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
 
     # Use single quotes for shell path
     $result = Invoke-AdbCommand "shell mv '$ItemPath' '$newItemPath'"
