@@ -67,13 +67,17 @@ function Invoke-AdbCommand {
     )
     Write-Log "Executing ADB Command: adb $Command" "DEBUG"
 
-    # Using temporary files for stdout/stderr is more robust for capturing all output
-    $process = Start-Process adb -ArgumentList $Command -Wait -NoNewWindow -PassThru -RedirectStandardOutput "temp_stdout.txt" -RedirectStandardError "temp_stderr.txt"
-    $exitCode = $process.ExitCode
-    
-    $stdout = Get-Content "temp_stdout.txt" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    $stderr = Get-Content "temp_stderr.txt" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-    Remove-Item "temp_stdout.txt", "temp_stderr.txt" -ErrorAction SilentlyContinue
+    try {
+        # Using temporary files for stdout/stderr is more robust for capturing all output
+        $process = Start-Process adb -ArgumentList $Command -Wait -NoNewWindow -PassThru -RedirectStandardOutput "temp_stdout.txt" -RedirectStandardError "temp_stderr.txt"
+        $exitCode = $process.ExitCode
+
+        $stdout = Get-Content "temp_stdout.txt" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $stderr = Get-Content "temp_stderr.txt" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+    }
+    finally {
+        Remove-Item "temp_stdout.txt", "temp_stderr.txt" -ErrorAction SilentlyContinue
+    }
 
     $success = ($exitCode -eq 0)
     # Some successful commands (like pull) write to stderr, so we combine them on success.
