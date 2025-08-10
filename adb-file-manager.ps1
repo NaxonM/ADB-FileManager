@@ -546,9 +546,12 @@ function Pull-FilesFromAndroid {
         # Pipe to Out-String to prevent PowerShell from formatting stderr as an error object
         $adbCommand = { param($source, $dest) adb pull $source $dest 2>&1 | Out-String }
         $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destinationFolder)
-        
+
         $itemStartTime = Get-Date
         Write-Host ""
+
+        $lastReportedSize = 0L
+        $lastWriteTime   = [DateTime]::MinValue
 
         $jobStart = Get-Date
         $startTimeout = [TimeSpan]::FromSeconds(5)
@@ -557,7 +560,26 @@ function Pull-FilesFromAndroid {
                 if ($job.State -eq 'NotStarted') {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
-                    $currentSize = Get-LocalItemSize -ItemPath $destPathOnPC
+                    $currentSize = $lastReportedSize
+                    if (Test-Path -LiteralPath $destPathOnPC) {
+                        try {
+                            $itemInfo = Get-Item -LiteralPath $destPathOnPC -ErrorAction Stop
+                            if ($itemInfo.PSIsContainer) {
+                                if ($itemInfo.LastWriteTime -gt $lastWriteTime) {
+                                    $currentSize     = Get-LocalItemSize -ItemPath $destPathOnPC
+                                    $lastReportedSize = $currentSize
+                                    $lastWriteTime    = $itemInfo.LastWriteTime
+                                }
+                            } else {
+                                if ($itemInfo.Length -gt $lastReportedSize) {
+                                    $currentSize      = Get-LocalItemSize -ItemPath $destPathOnPC
+                                    $lastReportedSize = $currentSize
+                                }
+                            }
+                        } catch {
+                            # If we can't access the item yet, keep last reported size
+                        }
+                    }
                     Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
                 }
                 Start-Sleep -Milliseconds $updateInterval
@@ -565,6 +587,7 @@ function Pull-FilesFromAndroid {
         }
 
         $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
+        if ($finalSize -lt $lastReportedSize) { $finalSize = $lastReportedSize }
         Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
         Write-Host ""
 
