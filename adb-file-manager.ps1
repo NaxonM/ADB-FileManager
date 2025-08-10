@@ -306,6 +306,7 @@ function Get-AndroidItemsSize {
     $totalSize = 0L
     $itemSizes = @{}
     $dirsToQuery = @()
+    $failedSizeCalc = $false
 
     # Separate files and directories. Files already have their size from the 'ls' command.
     foreach ($item in $Items) {
@@ -353,7 +354,12 @@ function Get-AndroidItemsSize {
         if (-not $itemSizes.ContainsKey($item.FullPath)) {
             $itemSizes[$item.FullPath] = 0L
             Write-Log "Could not determine size for '$($item.FullPath)'. Defaulting to 0." "WARN"
+            if ($item.Type -eq 'Directory') { $failedSizeCalc = $true }
         }
+    }
+
+    if ($failedSizeCalc) {
+        Write-Host "⚠️  Warning: Unable to determine size for one or more directories. They have been set to 0." -ForegroundColor Yellow
     }
 
     return [PSCustomObject]@{ TotalSize = $totalSize; ItemSizes = $itemSizes }
