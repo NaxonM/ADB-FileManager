@@ -136,7 +136,16 @@ function Update-DeviceStatus {
         Write-Log "No device connected." "INFO"
     }
     # Update the timestamp after a full check.
-    $script:LastStatusUpdateTime = (Get-Date)
+  $script:LastStatusUpdateTime = (Get-Date)
+}
+
+# Converts a path to Android-friendly format.
+function ConvertTo-AndroidPath {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) { return "/" }
+    $converted = $Path.Replace('\\', '/').TrimEnd('/')
+    if ([string]::IsNullOrEmpty($converted)) { $converted = "/" }
+    return $converted
 }
 
 # Invalidates the cache for a specific directory path.
@@ -144,8 +153,7 @@ function Invalidate-DirectoryCache {
     param([string]$DirectoryPath)
 
     # Normalize path to use forward slashes and no trailing slash for consistency
-    $normalizedPath = $DirectoryPath.Replace('\', '/').TrimEnd('/')
-    if ([string]::IsNullOrEmpty($normalizedPath)) { $normalizedPath = "/" }
+    $normalizedPath = ConvertTo-AndroidPath $DirectoryPath
 
     if ($script:DirectoryCache.ContainsKey($normalizedPath)) {
         Write-Log "CACHE INVALIDATION: Removing '$normalizedPath' from cache." "INFO"
@@ -161,8 +169,8 @@ function Invalidate-ParentCache {
         return
     }
      # Normalize to forward slashes and remove any trailing slash
-    $normalizedItemPath = $ItemPath.Replace('\', '/').TrimEnd('/')
-    if ([string]::IsNullOrEmpty($normalizedItemPath) -or $normalizedItemPath -eq "/") { return }
+    $normalizedItemPath = ConvertTo-AndroidPath $ItemPath
+    if ($normalizedItemPath -eq "/") { return }
 
     $lastSlashIndex = $normalizedItemPath.LastIndexOf('/')
     # If no slash or it's the only character, the parent is root.
@@ -372,8 +380,7 @@ function Get-AndroidDirectoryContents {
         [string]$Path
     )
     # Normalize path for cache key consistency
-    $normalizedPath = $Path.Replace('\', '/').TrimEnd('/')
-    if ([string]::IsNullOrEmpty($normalizedPath)) { $normalizedPath = "/" }
+    $normalizedPath = ConvertTo-AndroidPath $Path
     if (-not (Test-AndroidPath $normalizedPath)) {
         Write-Host "❌ Invalid path." -ForegroundColor Red
         return @()
