@@ -152,12 +152,12 @@ function ConvertTo-AndroidPath {
 function Invalidate-DirectoryCache {
     param([string]$DirectoryPath)
 
-    # Normalize path to use forward slashes and no trailing slash for consistency
-    $normalizedPath = ConvertTo-AndroidPath $DirectoryPath
+    # Always normalize the path before interacting with the cache.
+    $cacheKey = ConvertTo-AndroidPath $DirectoryPath
 
-    if ($script:DirectoryCache.ContainsKey($normalizedPath)) {
-        Write-Log "CACHE INVALIDATION: Removing '$normalizedPath' from cache." "INFO"
-        $script:DirectoryCache.Remove($normalizedPath)
+    if ($script:DirectoryCache.ContainsKey($cacheKey)) {
+        Write-Log "CACHE INVALIDATION: Removing '$cacheKey' from cache." "INFO"
+        $script:DirectoryCache.Remove($cacheKey)
     }
 }
 
@@ -380,31 +380,31 @@ function Get-AndroidDirectoryContents {
         [string]$Path
     )
     # Normalize path for cache key consistency
-    $normalizedPath = ConvertTo-AndroidPath $Path
-    if (-not (Test-AndroidPath $normalizedPath)) {
+    $cacheKey = ConvertTo-AndroidPath $Path
+    if (-not (Test-AndroidPath $cacheKey)) {
         Write-Host "❌ Invalid path." -ForegroundColor Red
         return @()
     }
 
-    # Check cache first
-    if ($script:DirectoryCache.ContainsKey($normalizedPath)) {
-        Write-Log "CACHE HIT: Returning cached contents for '$normalizedPath'." "DEBUG"
-        return $script:DirectoryCache[$normalizedPath]
+    # Check cache first using the normalized key
+    if ($script:DirectoryCache.ContainsKey($cacheKey)) {
+        Write-Log "CACHE HIT: Returning cached contents for '$cacheKey'." "DEBUG"
+        return $script:DirectoryCache[$cacheKey]
     }
-    Write-Log "CACHE MISS: Fetching contents for '$normalizedPath' from device." "DEBUG"
+    Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG"
 
     # Canonicalize the path to resolve symbolic links before listing contents.
-    $canonicalResult = Invoke-AdbCommand "shell readlink -f '$normalizedPath'"
+    $canonicalResult = Invoke-AdbCommand "shell readlink -f '$cacheKey'"
     $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) { 
         $canonicalResult.Output.Trim()
     } else { 
-        $normalizedPath 
+        $cacheKey
     }
     if (-not (Test-AndroidPath $listPath)) {
         Write-Host "❌ Invalid path." -ForegroundColor Red
         return @()
     }
-    Write-Log "Canonical path for listing: '$listPath' (from '$normalizedPath')" "DEBUG"
+    Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG"
 
     # Use the canonical path for the 'ls' command.
     $result = Invoke-AdbCommand "shell ls -la '$listPath'"
@@ -431,7 +431,7 @@ function Get-AndroidDirectoryContents {
             }
             
             # Always join with the original path for user context, not the canonical one
-            $fullPath = if ($normalizedPath.EndsWith('/')) { "$normalizedPath$name" } else { "$normalizedPath/$name" }
+            $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
             if (-not (Test-AndroidPath $fullPath)) {
                 Write-Log "Skipping item with unsafe path: $fullPath" "WARN"
                 continue
@@ -448,7 +448,7 @@ function Get-AndroidDirectoryContents {
     }
     
     # Store the fresh result in the cache using the original path as the key
-    $script:DirectoryCache[$normalizedPath] = $items
+    $script:DirectoryCache[$cacheKey] = $items
     return $items
 }
 
