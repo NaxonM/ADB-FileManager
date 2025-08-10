@@ -93,7 +93,10 @@ function Invoke-AdbCommand {
             $script:DeviceStatus.DeviceName   = "No Device"
             $script:DeviceStatus.SerialNumber = ""
             # By resetting the timestamp, we force Update-DeviceStatus to do a full check next time it's called.
-            $script:LastStatusUpdateTime = [DateTime]::MinValue 
+            $script:LastStatusUpdateTime = [DateTime]::MinValue
+            # Purge any cached directory entries since they're now invalid without a device.
+            $script:DirectoryCache.Clear()
+            Write-Log "Directory cache cleared due to device loss." "WARN"
         }
     }
 
