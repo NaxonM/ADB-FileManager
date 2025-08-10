@@ -527,6 +527,12 @@ function Pull-FilesFromAndroid {
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
     $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
     $overallStartTime = Get-Date
+    # Determine progress update interval based on total transfer size
+    $updateInterval = switch ($totalSize) {
+        { $_ -ge 1GB } { 500 }
+        { $_ -ge 100MB } { 250 }
+        default { 100 }
+    }
 
     foreach ($item in $itemsToPull) {
         if (-not (Test-AndroidPath $item.FullPath)) {
@@ -554,7 +560,7 @@ function Pull-FilesFromAndroid {
                     $currentSize = Get-LocalItemSize -ItemPath $destPathOnPC
                     Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
                 }
-                Start-Sleep -Milliseconds 250
+                Start-Sleep -Milliseconds $updateInterval
             }
         }
 
