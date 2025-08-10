@@ -360,12 +360,35 @@ function Get-AndroidItemsSize {
 }
 
 function Get-LocalItemSize {
-    param([string]$ItemPath)
+    param(
+        [string]$ItemPath,
+        [switch]$ShowStatus
+    )
     try {
         if (-not (Test-Path -LiteralPath $ItemPath)) { return 0 }
         $item = Get-Item -LiteralPath $ItemPath -ErrorAction Stop
         if ($item.PSIsContainer) {
-            $size = (Get-ChildItem -LiteralPath $ItemPath -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            $sb = {
+                param($path)
+                (Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+            }
+            $job = Start-Job -ScriptBlock $sb -ArgumentList $ItemPath
+            if ($ShowStatus) {
+                $spinner = @('|','/','-','\')
+                $spinnerIndex = 0
+                while ($job.State -eq 'Running') {
+                    $status = "Calculating size for '$ItemPath'... $($spinner[$spinnerIndex])"
+                    Write-Host "`r$status" -NoNewline
+                    $spinnerIndex = ($spinnerIndex + 1) % $spinner.Length
+                    Start-Sleep -Milliseconds 150
+                }
+                Write-Host "`rCalculating size for '$ItemPath'... done" -NoNewline
+                Write-Host ""
+            } else {
+                Wait-Job $job | Out-Null
+            }
+            $size = Receive-Job -Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force | Out-Null
             return [long]$size
         } else {
             return $item.Length
@@ -658,7 +681,7 @@ function Push-FilesToAndroid {
     Write-Host "Calculating total size... Please wait." -NoNewline
     [long]$totalSize = 0
     foreach ($item in $sourceItems) {
-        $totalSize += Get-LocalItemSize -ItemPath $item
+        $totalSize += Get-LocalItemSize -ItemPath $item -ShowStatus
     }
     Write-Host "`r" + (" " * 50) + "`r"
     Write-Host "You are about to $actionVerb $($sourceItems.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
