@@ -206,6 +206,36 @@ function Test-AndroidPath {
     return $true
 }
 
+# Validates numeric selection strings (e.g., "1,3,5" or "1-3") or 'all'
+function Test-ValidSelection {
+    param(
+        [string]$Selection,
+        [int]$Max
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Selection)) { return @() }
+    $sel = $Selection.Trim().ToLower()
+    if ($sel -eq 'all') { return 0..($Max - 1) }
+
+    $indices = @()
+    foreach ($part in $sel.Split(',')) {
+        $p = $part.Trim()
+        if ($p -match '^(\d+)-(\d+)$') {
+            $start = [int]$Matches[1]
+            $end   = [int]$Matches[2]
+            if ($start -lt 1 -or $end -gt $Max -or $start -gt $end) { return $null }
+            $indices += ($start-1)..($end-1)
+        } elseif ($p -match '^\d+$') {
+            $num = [int]$p
+            if ($num -lt 1 -or $num -gt $Max) { return $null }
+            $indices += ($num-1)
+        } else {
+            return $null
+        }
+    }
+    return ($indices | Sort-Object -Unique)
+}
+
 # --- UI and Utility Functions ---
 
 function Show-UIHeader {
@@ -519,11 +549,10 @@ function Pull-FilesFromAndroid {
             }
             Write-Host (" [{0,2}] {1} {2}" -f ($i+1), $icon, $allItems[$i].Name)
         }
-        $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1,3,5 or 'all')"
-        if ($selectionStr -eq 'all') { $itemsToPull = $allItems } 
-        elseif ($selectionStr) {
-            $selectedIndices = $selectionStr -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ - 1 }
-            $itemsToPull = $selectedIndices | ForEach-Object { if ($_ -ge 0 -and $_ -lt $allItems.Count) { $allItems[$_] } }
+        $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1-3,5 or 'all')"
+        $selectedIndices = Test-ValidSelection -Selection $selectionStr -Max $allItems.Count
+        if ($null -eq $selectedIndices) { Write-Host "❌ Invalid selection." -ForegroundColor Red; return }
+        $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
         }
     } else {
         # Use single quotes for shell path
@@ -537,6 +566,10 @@ function Pull-FilesFromAndroid {
 
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
+    if (-not (Test-AndroidPath $destinationFolder)) {
+        Write-Host "❌ Invalid path." -ForegroundColor Red
+        return
+    }
 
     # --- Confirmation Wizard with OPTIMIZED Size Calculation ---
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
@@ -699,6 +732,11 @@ function Push-FilesToAndroid {
 
     $successCount = 0; $failureCount = 0
     foreach ($item in $sourceItems) {
+        if (-not (Test-AndroidPath $destPathFinal)) {
+            Write-Host "❌ Invalid path." -ForegroundColor Red
+            $failureCount++
+            continue
+        }
         $itemInfo = Get-Item -LiteralPath $item
         $sourceItemSafe = """$($itemInfo.FullName)"""
         $destPathSafe = """$destPathFinal"""
