@@ -553,7 +553,6 @@ function Pull-FilesFromAndroid {
         $selectedIndices = Test-ValidSelection -Selection $selectionStr -Max $allItems.Count
         if ($null -eq $selectedIndices) { Write-Host "❌ Invalid selection." -ForegroundColor Red; return }
         $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
-        }
     } else {
         # Use single quotes for shell path
         $sizeResult = Invoke-AdbCommand "shell stat -c %s '$sourcePath'"
@@ -588,6 +587,8 @@ function Pull-FilesFromAndroid {
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
     $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
+    [int]$processedItemCount = 0
+    $gcTriggerThreshold = 10
     $overallStartTime = Get-Date
     # Determine progress update interval based on total transfer size
     $updateInterval = switch ($totalSize) {
@@ -676,6 +677,11 @@ function Pull-FilesFromAndroid {
             $failureCount++; Write-Host "`n❌ FAILED to pull $($item.Name)." -ForegroundColor Red
             Write-Host "   Error: $resultOutput" -ForegroundColor Red
         }
+
+        $processedItemCount++
+        if (($processedItemCount % $gcTriggerThreshold) -eq 0) {
+            [System.GC]::Collect()
+        }
     }
     $overallTimeTaken = ((Get-Date) - $overallStartTime).TotalSeconds
     Write-Host "`n📊 TRANSFER SUMMARY" -ForegroundColor Cyan
@@ -731,6 +737,8 @@ function Push-FilesToAndroid {
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
     $successCount = 0; $failureCount = 0
+    [int]$processedItemCount = 0
+    $gcTriggerThreshold = 10
     foreach ($item in $sourceItems) {
         if (-not (Test-AndroidPath $destPathFinal)) {
             Write-Host "❌ Invalid path." -ForegroundColor Red
@@ -792,6 +800,11 @@ function Push-FilesToAndroid {
         } else {
             $failureCount++; Write-Host "`n❌ FAILED to push $($itemInfo.Name)." -ForegroundColor Red
             Write-Host "   Error: $resultOutput" -ForegroundColor Red
+        }
+
+        $processedItemCount++
+        if (($processedItemCount % $gcTriggerThreshold) -eq 0) {
+            [System.GC]::Collect()
         }
     }
     Write-Host "`n📊 TRANSFER SUMMARY: ✅ $successCount Successful, ❌ $failureCount Failed" -ForegroundColor Cyan
