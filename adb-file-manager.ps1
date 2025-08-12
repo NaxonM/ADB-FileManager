@@ -42,7 +42,10 @@ $script:DeviceStatus = @{
     SerialNumber = ""
 }
 # Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
-$script:DirectoryCache = @{}
+# Use an ordered dictionary so entries can be removed in least-recently-used order.
+$script:DirectoryCache = [ordered]@{}
+# Maximum number of entries to keep in the directory cache
+$script:MaxDirectoryCacheEntries = 100
 # Timestamp for the last device status check to prevent excessive ADB calls.
 $script:LastStatusUpdateTime = [DateTime]::MinValue
 
@@ -158,7 +161,7 @@ function Invalidate-DirectoryCache {
     # Always normalize the path before interacting with the cache.
     $cacheKey = ConvertTo-AndroidPath $DirectoryPath
 
-    if ($script:DirectoryCache.ContainsKey($cacheKey)) {
+    if ($script:DirectoryCache.Contains($cacheKey)) {
         Write-Log "CACHE INVALIDATION: Removing '$cacheKey' from cache." "INFO"
         $script:DirectoryCache.Remove($cacheKey)
     }
@@ -182,6 +185,30 @@ function Invalidate-ParentCache {
     } else {
         $parentPath = $normalizedItemPath.Substring(0, $lastSlashIndex)
         Invalidate-DirectoryCache -DirectoryPath $parentPath
+    }
+}
+
+# Adds an entry to a cache and enforces a maximum number of entries.
+# When the limit is exceeded, the least-recently-used entry is removed.
+function Add-ToCacheWithLimit {
+    param(
+        [hashtable]$Cache,
+        [string]$Key,
+        $Value,
+        [int]$MaxEntries
+    )
+
+    # If the key already exists, remove it so re-adding moves it to the end
+    if ($Cache.Contains($Key)) {
+        $Cache.Remove($Key)
+    }
+
+    $Cache[$Key] = $Value
+
+    while ($Cache.Count -gt $MaxEntries) {
+        $oldestKey = ($Cache.Keys)[0]
+        $Cache.Remove($oldestKey)
+        Write-Log "CACHE LIMIT EXCEEDED: Removed least recently used entry '$oldestKey'." "DEBUG"
     }
 }
 
@@ -449,9 +476,13 @@ function Get-AndroidDirectoryContents {
     }
 
     # Check cache first using the normalized key
-    if ($script:DirectoryCache.ContainsKey($cacheKey)) {
+    if ($script:DirectoryCache.Contains($cacheKey)) {
         Write-Log "CACHE HIT: Returning cached contents for '$cacheKey'." "DEBUG"
-        return $script:DirectoryCache[$cacheKey]
+        $cached = $script:DirectoryCache[$cacheKey]
+        # Update order to reflect recent use
+        $script:DirectoryCache.Remove($cacheKey)
+        $script:DirectoryCache[$cacheKey] = $cached
+        return $cached
     }
     Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG"
 
@@ -510,7 +541,7 @@ function Get-AndroidDirectoryContents {
     }
     
     # Store the fresh result in the cache using the original path as the key
-    $script:DirectoryCache[$cacheKey] = $items
+    Add-ToCacheWithLimit -Cache $script:DirectoryCache -Key $cacheKey -Value $items -MaxEntries $script:MaxDirectoryCacheEntries
     return $items
 }
 
