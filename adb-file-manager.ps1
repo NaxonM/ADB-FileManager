@@ -536,6 +536,19 @@ function Show-InlineProgress {
 }
 
 
+# Starts a background job using Start-ThreadJob on PowerShell 7+, falling back to Start-Job otherwise.
+function Start-PortableJob {
+    param(
+        [ScriptBlock]$ScriptBlock,
+        [object[]]$ArgumentList
+    )
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        return Start-ThreadJob -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    } else {
+        return Start-Job -ScriptBlock $ScriptBlock -ArgumentList $ArgumentList
+    }
+}
+
 # --- File and Directory Size Calculation ---
 
 # Gets the size of multiple Android items (files/dirs) using an optimized single command for directories.
@@ -619,7 +632,7 @@ function Get-LocalItemSize {
                 param($path)
                 (Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
             }
-            $job = Start-Job -ScriptBlock $sb -ArgumentList $ItemPath
+            $job = Start-PortableJob -ScriptBlock $sb -ArgumentList $ItemPath
             if ($ShowStatus) {
                 $spinner = @('|','/','-','\')
                 $spinnerIndex = 0
@@ -929,7 +942,7 @@ function Execute-PullTransfer {
         $itemTotalSize = $ItemSizes[$item.FullPath]
 
         $adbCommand = { param($adbPath, $source, $dest, $serial) & $adbPath -s $serial pull $source $dest 2>&1 | Out-String }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $Destination, $State.DeviceStatus.SerialNumber)
+        $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $Destination, $State.DeviceStatus.SerialNumber)
 
         $itemStartTime = Get-Date
         Write-Host ""
@@ -1141,7 +1154,7 @@ function Execute-PushTransfer {
             param($adbPath, $source, $dest, $serial)
             & $adbPath -s $serial push $source $dest 2>&1 | Out-String
         }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $destPath, $State.DeviceStatus.SerialNumber)
+        $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $destPath, $State.DeviceStatus.SerialNumber)
 
         $itemTotalSize = $ItemSizes[$item]
         $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
