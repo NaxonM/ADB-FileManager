@@ -62,6 +62,20 @@ function Write-Log {
     Add-Content -Path $script:LogFile -Value $logEntry
 }
 
+# Writes a formatted error message to the console.
+function Write-ErrorMessage {
+    param(
+        [string]$Operation,
+        [string]$Item = "",
+        [string]$Details = "",
+        [switch]$NoNewline
+    )
+    $message = "❌ $Operation"
+    if ($Item) { $message += " '$Item'" }
+    if ($Details) { $message += ". $Details" }
+    Write-Host $message -ForegroundColor Red -NoNewline:$NoNewline
+}
+
 # Centralized function to execute simple ADB commands and get their direct output.
 function Invoke-AdbCommand {
     param(
@@ -171,7 +185,7 @@ function Invalidate-DirectoryCache {
 function Invalidate-ParentCache {
      param([string]$ItemPath)
     if (-not (Test-AndroidPath $ItemPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
      # Normalize to forward slashes and remove any trailing slash
@@ -226,7 +240,7 @@ function Test-AndroidPath {
     )
     foreach ($ch in $invalidChars) {
         if ($Path -and $Path.Contains($ch)) {
-            Write-Host "❌ Path contains invalid character '$ch'." -ForegroundColor Red
+            Write-ErrorMessage -Operation "Path contains invalid character" -Item $ch
             return $false
         }
     }
@@ -288,7 +302,7 @@ function Show-UIHeader {
     if ($script:DeviceStatus.IsConnected) {
         Write-Host "$statusText $($script:DeviceStatus.DeviceName) ($($script:DeviceStatus.SerialNumber))" -ForegroundColor Green
     } else {
-        Write-Host "$statusText Disconnected - Please connect a device." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Status" -Item "Disconnected" -Details "Please connect a device."
     }
     Write-Host ("─" * $width) -ForegroundColor Gray
 }
@@ -471,7 +485,7 @@ function Get-AndroidDirectoryContents {
     # Normalize path for cache key consistency
     $cacheKey = ConvertTo-AndroidPath $Path
     if (-not (Test-AndroidPath $cacheKey)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return @()
     }
 
@@ -494,7 +508,7 @@ function Get-AndroidDirectoryContents {
         $cacheKey
     }
     if (-not (Test-AndroidPath $listPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return @()
     }
     Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG"
@@ -503,8 +517,8 @@ function Get-AndroidDirectoryContents {
     $result = Invoke-AdbCommand "shell ls -la '$listPath'"
 
     if (-not $result.Success) {
-        Write-Host "`n❌ Failed to list directory '$Path'." -ForegroundColor Red
-        Write-Host "   Error: $($result.Output)" -ForegroundColor Red
+        Write-Host ""
+        Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $result.Output
         return @()
     }
 
@@ -556,7 +570,7 @@ function Pull-FilesFromAndroid {
     $sourcePath = if ($Path) { $Path } else { Read-Host "➡️  Enter source path on Android to pull from (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return }
     if (-not (Test-AndroidPath $sourcePath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
 
@@ -582,7 +596,7 @@ function Pull-FilesFromAndroid {
         }
         $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1-3,5 or 'all')"
         $selectedIndices = Test-ValidSelection -Selection $selectionStr -Max $allItems.Count
-        if ($null -eq $selectedIndices) { Write-Host "❌ Invalid selection." -ForegroundColor Red; return }
+        if ($null -eq $selectedIndices) { Write-ErrorMessage -Operation "Invalid selection"; return }
         $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
     } else {
         # Use single quotes for shell path
@@ -597,7 +611,7 @@ function Pull-FilesFromAndroid {
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
     if (-not (Test-AndroidPath $destinationFolder)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
 
@@ -630,7 +644,7 @@ function Pull-FilesFromAndroid {
 
     foreach ($item in $itemsToPull) {
         if (-not (Test-AndroidPath $item.FullPath)) {
-            Write-Host "❌ Skipping '$($item.Name)' due to invalid path." -ForegroundColor Red
+            Write-ErrorMessage -Operation "Skipping" -Item $item.Name -Details "Invalid path"
             continue
         }
         $sourceItemSafe = """$($item.FullPath)"""
@@ -702,11 +716,15 @@ function Pull-FilesFromAndroid {
                 if ($deleteResult.Success) {
                     Write-Host " ✅" -ForegroundColor Green
                     Invalidate-ParentCache -ItemPath $item.FullPath
-                } else { Write-Host " ❌ (Failed to delete)" -ForegroundColor Red }
+                } else {
+                    Write-Host " " -NoNewline
+                    Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
+                }
             }
         } else {
-            $failureCount++; Write-Host "`n❌ FAILED to pull $($item.Name)." -ForegroundColor Red
-            Write-Host "   Error: $resultOutput" -ForegroundColor Red
+            $failureCount++
+            Write-Host ""
+            Write-ErrorMessage -Operation "FAILED to pull" -Item $item.Name -Details $resultOutput
         }
 
         $processedItemCount++
@@ -738,7 +756,7 @@ function Push-FilesToAndroid {
             $selectedFolder = Show-FolderPicker -Description "Select a folder to push"
             if ($selectedFolder) { $sourceItems += $selectedFolder }
         }
-        default { Write-Host "❌ Invalid selection." -ForegroundColor Red; return }
+        default { Write-ErrorMessage -Operation "Invalid selection"; return }
     }
 
     if ($sourceItems.Count -eq 0) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return }
@@ -747,7 +765,7 @@ function Push-FilesToAndroid {
     else { Read-Host "➡️  Enter destination path on Android (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($destPathFinal)) { Write-Host "🟡 Action cancelled."; return }
     if (-not (Test-AndroidPath $destPathFinal)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
 
@@ -780,7 +798,7 @@ function Push-FilesToAndroid {
     }
     foreach ($item in $sourceItems) {
         if (-not (Test-AndroidPath $destPathFinal)) {
-            Write-Host "❌ Invalid path." -ForegroundColor Red
+            Write-ErrorMessage -Operation "Invalid path"
             $failureCount++
             continue
         }
@@ -842,12 +860,14 @@ function Push-FilesToAndroid {
                     Remove-Item -LiteralPath $itemInfo.FullName -Force -Recurse -ErrorAction Stop
                     Write-Host " ✅" -ForegroundColor Green
                 } catch {
-                    Write-Host " ❌ (Failed to delete)" -ForegroundColor Red
+                    Write-Host " " -NoNewline
+                    Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
                 }
             }
         } else {
-            $failureCount++; Write-Host "`n❌ FAILED to push $($itemInfo.Name)." -ForegroundColor Red
-            Write-Host "   Error: $resultOutput" -ForegroundColor Red
+            $failureCount++
+            Write-Host ""
+            Write-ErrorMessage -Operation "FAILED to push" -Item $itemInfo.Name -Details $resultOutput
         }
 
         $processedItemCount++
@@ -865,7 +885,7 @@ function Browse-AndroidFileSystem {
     $currentPath = Read-Host "➡️  Enter starting path (default: /sdcard/)"
     if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "/sdcard/" }
     if (-not (Test-AndroidPath $currentPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
 
@@ -930,14 +950,15 @@ function Browse-AndroidFileSystem {
                         if (Test-AndroidPath $selectedItem.FullPath) {
                             $currentPath = $selectedItem.FullPath
                         } else {
-                            Write-Host "❌ Invalid path." -ForegroundColor Red
+                            Write-ErrorMessage -Operation "Invalid path"
                             Start-Sleep -Seconds 1
                         }
                     } else { 
                         Show-ItemActionMenu -Item $selectedItem 
                     }
                 } else {
-                    Write-Host "❌ Invalid selection." -ForegroundColor Red; Start-Sleep -Seconds 1
+                    Write-ErrorMessage -Operation "Invalid selection"
+                    Start-Sleep -Seconds 1
                 }
             }
         }
@@ -950,7 +971,7 @@ function New-AndroidFolder {
     if ([string]::IsNullOrWhiteSpace($folderName)) { Write-Host "🟡 Action cancelled: No name provided." -ForegroundColor Yellow; return }
     $fullPath = if ($ParentPath.EndsWith('/')) { "$ParentPath$folderName" } else { "$ParentPath/$folderName" }
     if (-not (Test-AndroidPath $fullPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
     # Use single quotes for shell path
@@ -958,8 +979,8 @@ function New-AndroidFolder {
     if ($result.Success) {
         Write-Host "✅ Successfully created folder: $fullPath" -ForegroundColor Green
         Invalidate-ParentCache -ItemPath $fullPath
-    } 
-    else { Write-Host "❌ Failed to create folder. Error: $($result.Output)" -ForegroundColor Red }
+    }
+    else { Write-ErrorMessage -Operation "Failed to create folder" -Item $fullPath -Details $result.Output }
 }
 
 function Show-ItemActionMenu {
@@ -988,7 +1009,7 @@ function Show-ItemActionMenu {
                 return # Return to browser as item is gone
             }
             "5" { return }
-            default { Write-Host "❌ Invalid choice." -ForegroundColor Red; Start-Sleep -Seconds 1 }
+            default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
     }
 }
@@ -996,7 +1017,7 @@ function Show-ItemActionMenu {
 function Remove-AndroidItem {
     param([string]$ItemPath)
     if (-not (Test-AndroidPath $ItemPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
     $itemName = $ItemPath.Split('/')[-1]
@@ -1007,25 +1028,25 @@ function Remove-AndroidItem {
     if ($result.Success) {
         Write-Host "✅ Successfully deleted '$itemName'." -ForegroundColor Green
         Invalidate-ParentCache -ItemPath $ItemPath
-    } 
-    else { Write-Host "❌ Failed to delete '$itemName'. Error: $($result.Output)" -ForegroundColor Red }
+    }
+    else { Write-ErrorMessage -Operation "Failed to delete" -Item $itemName -Details $result.Output }
 }
 
 function Rename-AndroidItem {
     param([string]$ItemPath)
     if (-not (Test-AndroidPath $ItemPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
     $itemName = $ItemPath.Split('/')[-1]
     $newName = Read-Host "➡️  Enter the new name for '$itemName'"
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Contains('/') -or $newName.Contains('\')) {
-        Write-Host "❌ Invalid name." -ForegroundColor Red; return
+        Write-ErrorMessage -Operation "Invalid name"; return
     }
     $parentPath = $ItemPath.Substring(0, $ItemPath.LastIndexOf('/'))
     $newItemPath = if ([string]::IsNullOrEmpty($parentPath)) { "/$newName" } else { "$parentPath/$newName" }
     if (-not (Test-AndroidPath $newItemPath)) {
-        Write-Host "❌ Invalid path." -ForegroundColor Red
+        Write-ErrorMessage -Operation "Invalid path"
         return
     }
 
@@ -1034,9 +1055,9 @@ function Rename-AndroidItem {
     if ($result.Success) {
         Write-Host "✅ Successfully renamed to '$newName'." -ForegroundColor Green
         # Invalidate the old item's parent directory to refresh the browser view
-        Invalidate-ParentCache -ItemPath $ItemPath 
+        Invalidate-ParentCache -ItemPath $ItemPath
     } else {
-        Write-Host "❌ Failed to rename. Error: $($result.Output)" -ForegroundColor Red
+        Write-ErrorMessage -Operation "Failed to rename" -Item $itemName -Details $result.Output
     }
 }
 
@@ -1095,7 +1116,8 @@ function Show-MainMenu {
         $choice = Read-Host "➡️  Enter your choice"
 
         if ($choice -in '1', '2', '3' -and -not $script:DeviceStatus.IsConnected) {
-            Write-Host "`n❌ Cannot perform this action: No device connected." -ForegroundColor Red
+            Write-Host ""
+            Write-ErrorMessage -Operation "Cannot perform this action" -Details "No device connected."
             Read-Host "Press Enter to continue"
             continue
         }
@@ -1105,7 +1127,7 @@ function Show-MainMenu {
             '2' { Push-FilesToAndroid }
             '3' { Pull-FilesFromAndroid }
             'q' { return }
-            default { Write-Host "❌ Invalid choice." -ForegroundColor Red; Start-Sleep -Seconds 1 }
+            default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
         
         if ($choice -in '2','3') {
@@ -1121,8 +1143,7 @@ function Start-ADBTool {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
     if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
-        Write-Host "❌ ADB not found in your system's PATH." -ForegroundColor Red
-        Write-Host "Please install Android SDK Platform Tools and add its directory to your system's PATH environment variable." -ForegroundColor Red
+        Write-ErrorMessage -Operation "ADB not found in your system's PATH" -Details "Please install Android SDK Platform Tools and add its directory to your system's PATH environment variable."
         Read-Host "Press Enter to exit."
         return
     }
