@@ -132,7 +132,13 @@ function Invoke-AdbCommand {
         [string[]]$Arguments,
         [switch]$HideOutput
     )
-    Write-Log ("Executing ADB Command: adb {0}" -f ($Arguments -join ' ')) "DEBUG" -SanitizePaths
+    $argList = @()
+    if ($State.DeviceStatus.SerialNumber) {
+        $argList += '-s'
+        $argList += $State.DeviceStatus.SerialNumber
+    }
+    if ($Arguments) { $argList += $Arguments }
+    Write-Log ("Executing ADB Command: adb {0}" -f ($argList -join ' ')) "DEBUG" -SanitizePaths
 
     $stdout = ''
     $stderr = ''
@@ -142,7 +148,7 @@ function Invoke-AdbCommand {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
-        foreach ($arg in $Arguments) { $null = $psi.ArgumentList.Add($arg) }
+        foreach ($arg in $argList) { $null = $psi.ArgumentList.Add($arg) }
 
         $process = [System.Diagnostics.Process]::Start($psi)
         $stdout = $process.StandardOutput.ReadToEnd()
@@ -243,7 +249,7 @@ function Update-DeviceStatus {
         $State.DeviceStatus.IsConnected = $true
         $State.DeviceStatus.SerialNumber = $serialNumber.Trim()
 
-        $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('-s', $serialNumber, 'shell', 'getprop', 'ro.product.model')
+        $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('shell', 'getprop', 'ro.product.model')
         $State = $deviceNameResult.State
         if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
             $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
@@ -797,8 +803,8 @@ function Execute-PullTransfer {
         $destPathOnPC = Join-Path $Destination $item.Name
         $itemTotalSize = $ItemSizes[$item.FullPath]
 
-        $adbCommand = { param($source, $dest) adb pull $source $dest 2>&1 | Out-String }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $Destination)
+        $adbCommand = { param($source, $dest, $serial) adb -s $serial pull $source $dest 2>&1 | Out-String }
+        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $Destination, $State.DeviceStatus.SerialNumber)
 
         $itemStartTime = Get-Date
         Write-Host ""
@@ -1007,10 +1013,10 @@ function Execute-PushTransfer {
         $destPathSafe = """$Destination"""
 
         $adbCommand = {
-            param($source, $dest)
-            cmd.exe /c "adb push `$source `$dest 2>&1" | Out-String
+            param($source, $dest, $serial)
+            cmd.exe /c "adb -s $serial push `$source `$dest 2>&1" | Out-String
         }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe)
+        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe, $State.DeviceStatus.SerialNumber)
 
         $itemTotalSize = $ItemSizes[$item]
         $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
