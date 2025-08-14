@@ -559,32 +559,20 @@ function Get-AndroidDirectoryContents {
     return $items
 }
 
-function Pull-FilesFromAndroid {
-    param(
-        [string]$Path,
-        [switch]$Move
-    )
-    $actionVerb = if ($Move) { "MOVE" } else { "PULL" }
-    Write-Host "`n📥 $actionVerb FROM ANDROID" -ForegroundColor Magenta
-    
+function Select-PullItems {
+    param([string]$Path)
     $sourcePath = if ($Path) { $Path } else { Read-Host "➡️  Enter source path on Android to pull from (e.g., /sdcard/Download/)" }
-    if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return }
-    if (-not (Test-AndroidPath $sourcePath)) {
-        Write-ErrorMessage -Operation "Invalid path"
-        return
-    }
+    if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return $null }
+    if (-not (Test-AndroidPath $sourcePath)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
-
-    # Use single quotes for shell path
     $sourceIsDirResult = Invoke-AdbCommand "shell ls -ld '$sourcePath'"
     $isDir = $sourceIsDirResult.Success -and $sourceIsDirResult.Output.StartsWith('d')
 
     $itemsToPull = @()
     if ($isDir) {
-        # Cast to array to prevent errors when a directory has only one item.
         $allItems = @(Get-AndroidDirectoryContents $sourcePath)
-        if ($allItems.Count -eq 0) { Write-Host "🟡 Directory is empty or inaccessible." -ForegroundColor Yellow; return }
-        
+        if ($allItems.Count -eq 0) { Write-Host "🟡 Directory is empty or inaccessible." -ForegroundColor Yellow; return $null }
+
         Write-Host "`nItems available in '$($sourcePath)':" -ForegroundColor Cyan
         for ($i = 0; $i -lt $allItems.Count; $i++) {
             $icon = switch ($allItems[$i].Type) {
@@ -596,64 +584,89 @@ function Pull-FilesFromAndroid {
         }
         $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1-3,5 or 'all')"
         $selectedIndices = Test-ValidSelection -Selection $selectionStr -Max $allItems.Count
-        if ($null -eq $selectedIndices) { Write-ErrorMessage -Operation "Invalid selection"; return }
+        if ($null -eq $selectedIndices) { Write-ErrorMessage -Operation "Invalid selection"; return $null }
         $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
     } else {
-        # Use single quotes for shell path
         $sizeResult = Invoke-AdbCommand "shell stat -c %s '$sourcePath'"
         $fileSize = if ($sizeResult.Success -and $sizeResult.Output -match '^\d+$') { [long]$sizeResult.Output } else { 0L }
         $itemName = $sourcePath.Split('/')[-1]
         $itemsToPull += [PSCustomObject]@{ Name = $itemName; FullPath = $sourcePath; Type = 'File'; Size = $fileSize }
     }
-    
-    if ($itemsToPull.Count -eq 0) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return }
+
+    if ($itemsToPull.Count -eq 0) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return $null }
 
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
-    if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
-    if (-not (Test-AndroidPath $destinationFolder)) {
-        Write-ErrorMessage -Operation "Invalid path"
-        return
-    }
+    if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return $null }
+    if (-not (Test-AndroidPath $destinationFolder)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
-    # --- Confirmation Wizard with OPTIMIZED Size Calculation ---
+    return [PSCustomObject]@{
+        Items       = $itemsToPull
+        Destination = $destinationFolder
+        SourcePath  = $sourcePath
+        IsDirectory = $isDir
+    }
+}
+
+function Confirm-PullTransfer {
+    param(
+        [array]$Items,
+        [string]$SourcePath,
+        [string]$Destination,
+        [string]$ActionVerb,
+        [bool]$IsDirectory
+    )
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
     Write-Host "Calculating total size... Please wait." -NoNewline
 
-    # New optimized way to get sizes for all selected items at once.
-    $sizeInfo = Get-AndroidItemsSize -Items $itemsToPull
+    $sizeInfo = Get-AndroidItemsSize -Items $Items
     $totalSize = $sizeInfo.TotalSize
     $itemSizes = $sizeInfo.ItemSizes
-    
-    Write-Host "`r" + (" " * 50) + "`r" # Clear the "Calculating..." line
-    Write-Host "You are about to $actionVerb $($itemsToPull.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
-    $fromLocation = if ($isDir) { $sourcePath } else { $sourcePath.Substring(0, $sourcePath.LastIndexOf('/')) }
+
+    Write-Host "`r" + (" " * 50) + "`r"
+    Write-Host "You are about to $ActionVerb $($Items.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
+    $fromLocation = if ($IsDirectory) { $SourcePath } else { $SourcePath.Substring(0, $SourcePath.LastIndexOf('/')) }
     Write-Host "From (Android): $fromLocation" -ForegroundColor Yellow
-    Write-Host "To   (PC)    : $destinationFolder" -ForegroundColor Yellow
+    Write-Host "To   (PC)    : $Destination" -ForegroundColor Yellow
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
-    if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
-    $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
-    [int]$processedItemCount = 0
-    $gcTriggerThreshold = 10
-    $overallStartTime = Get-Date
-    # Determine progress update interval based on total transfer size
+    if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return $null }
+
     $updateInterval = switch ($totalSize) {
         { $_ -ge 1GB } { 500 }
         { $_ -ge 100MB } { 250 }
         default { 100 }
     }
 
-    foreach ($item in $itemsToPull) {
+    return [PSCustomObject]@{
+        ItemSizes      = $itemSizes
+        TotalSize      = $totalSize
+        UpdateInterval = $updateInterval
+    }
+}
+
+function Execute-PullTransfer {
+    param(
+        [array]$Items,
+        [hashtable]$ItemSizes,
+        [string]$Destination,
+        [switch]$Move,
+        [int]$UpdateInterval
+    )
+    $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
+    [int]$processedItemCount = 0
+    $gcTriggerThreshold = 10
+    $overallStartTime = Get-Date
+
+    foreach ($item in $Items) {
         if (-not (Test-AndroidPath $item.FullPath)) {
             Write-ErrorMessage -Operation "Skipping" -Item $item.Name -Details "Invalid path"
             continue
         }
         $sourceItemSafe = """$($item.FullPath)"""
-        $destPathOnPC = Join-Path $destinationFolder $item.Name
-        $itemTotalSize = $itemSizes[$item.FullPath]
-        
-        # Pipe to Out-String to prevent PowerShell from formatting stderr as an error object
+        $destPathOnPC = Join-Path $Destination $item.Name
+        $itemTotalSize = $ItemSizes[$item.FullPath]
+
         $adbCommand = { param($source, $dest) adb pull $source $dest 2>&1 | Out-String }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destinationFolder)
+        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $Destination)
 
         $itemStartTime = Get-Date
         Write-Host ""
@@ -684,13 +697,11 @@ function Pull-FilesFromAndroid {
                                     $lastReportedSize = $currentSize
                                 }
                             }
-                        } catch {
-                            # If we can't access the item yet, keep last reported size
-                        }
+                        } catch { }
                     }
                     Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
                 }
-                Start-Sleep -Milliseconds $updateInterval
+                Start-Sleep -Milliseconds $UpdateInterval
             }
         }
 
@@ -702,7 +713,7 @@ function Pull-FilesFromAndroid {
         $resultOutput = Receive-Job $job
         $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'No such file or directory|error:')
         Remove-Job $job
-        
+
         if ($success) {
             $successCount++
             $cumulativeBytesTransferred += $finalSize
@@ -711,7 +722,6 @@ function Pull-FilesFromAndroid {
 
             if ($Move) {
                 Write-Host "   - Removing source item..." -NoNewline
-                # Use single quotes for shell path
                 $deleteResult = Invoke-AdbCommand "shell rm -rf '$($item.FullPath)'"
                 if ($deleteResult.Success) {
                     Write-Host " ✅" -ForegroundColor Green
@@ -733,22 +743,50 @@ function Pull-FilesFromAndroid {
         }
     }
     $overallTimeTaken = ((Get-Date) - $overallStartTime).TotalSeconds
-    Write-Host "`n📊 TRANSFER SUMMARY" -ForegroundColor Cyan
-    Write-Host "   - ✅ $successCount Successful, ❌ $failureCount Failed"
-    Write-Host "   - Total Transferred: $(Format-Bytes $cumulativeBytesTransferred)"
-    Write-Host "   - Time Taken: $([math]::Round($overallTimeTaken, 2)) seconds"
+    return [PSCustomObject]@{
+        SuccessCount = $successCount
+        FailureCount = $failureCount
+        CumulativeBytes = $cumulativeBytesTransferred
+        TimeTaken = $overallTimeTaken
+    }
 }
 
-function Push-FilesToAndroid {
+function Show-PullSummary {
     param(
-        [switch]$Move,
-        [string]$DestinationPath
+        [int]$SuccessCount,
+        [int]$FailureCount,
+        [long]$CumulativeBytes,
+        [double]$TimeTaken
     )
-    $actionVerb = if ($Move) { "MOVE" } else { "PUSH" }
-    Write-Host "`n📤 $actionVerb ITEMS TO ANDROID" -ForegroundColor Magenta
-    
+    Write-Host "`n📊 TRANSFER SUMMARY" -ForegroundColor Cyan
+    Write-Host "   - ✅ $SuccessCount Successful, ❌ $FailureCount Failed"
+    Write-Host "   - Total Transferred: $(Format-Bytes $CumulativeBytes)"
+    Write-Host "   - Time Taken: $([math]::Round($TimeTaken, 2)) seconds"
+}
+
+function Pull-FilesFromAndroid {
+    param(
+        [string]$Path,
+        [switch]$Move
+    )
+    $actionVerb = if ($Move) { "MOVE" } else { "PULL" }
+    Write-Host "`n📥 $actionVerb FROM ANDROID" -ForegroundColor Magenta
+
+    $selection = Select-PullItems -Path $Path
+    if (-not $selection) { return }
+
+    $confirmation = Confirm-PullTransfer -Items $selection.Items -SourcePath $selection.SourcePath -Destination $selection.Destination -ActionVerb $actionVerb -IsDirectory:$selection.IsDirectory
+    if (-not $confirmation) { return }
+
+    $result = Execute-PullTransfer -Items $selection.Items -ItemSizes $confirmation.ItemSizes -Destination $selection.Destination -Move:$Move -UpdateInterval $confirmation.UpdateInterval
+
+    Show-PullSummary -SuccessCount $result.SuccessCount -FailureCount $result.FailureCount -CumulativeBytes $result.CumulativeBytes -TimeTaken $result.TimeTaken
+}
+ 
+function Select-PushItems {
+    param([string]$DestinationPath)
     $uploadType = Read-Host "What do you want to upload? (F)iles or a (D)irectory?"
-    
+
     $sourceItems = @()
     switch ($uploadType.ToLower()) {
         'f' { $sourceItems = Show-OpenFilePicker -Title "Select files to push" -MultiSelect }
@@ -756,66 +794,88 @@ function Push-FilesToAndroid {
             $selectedFolder = Show-FolderPicker -Description "Select a folder to push"
             if ($selectedFolder) { $sourceItems += $selectedFolder }
         }
-        default { Write-ErrorMessage -Operation "Invalid selection"; return }
+        default { Write-ErrorMessage -Operation "Invalid selection"; return $null }
     }
 
-    if ($sourceItems.Count -eq 0) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return }
+    if ($sourceItems.Count -eq 0) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return $null }
 
-    $destPathFinal = if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath } 
-    else { Read-Host "➡️  Enter destination path on Android (e.g., /sdcard/Download/)" }
-    if ([string]::IsNullOrWhiteSpace($destPathFinal)) { Write-Host "🟡 Action cancelled."; return }
+    $destPathFinal = if (-not [string]::IsNullOrWhiteSpace($DestinationPath)) { $DestinationPath }
+        else { Read-Host "➡️  Enter destination path on Android (e.g., /sdcard/Download/)" }
+    if ([string]::IsNullOrWhiteSpace($destPathFinal)) { Write-Host "🟡 Action cancelled."; return $null }
     if (-not (Test-AndroidPath $destPathFinal)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $null
     }
 
+    return [PSCustomObject]@{
+        Items       = $sourceItems
+        Destination = $destPathFinal
+    }
+}
 
-    # --- Confirmation Wizard with Size Calculation ---
+function Confirm-PushTransfer {
+    param(
+        [array]$Items,
+        [string]$Destination,
+        [string]$ActionVerb
+    )
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
     Write-Host "Calculating total size... Please wait." -NoNewline
     [long]$totalSize = 0
     $itemSizes = @{}
-    foreach ($item in $sourceItems) {
+    foreach ($item in $Items) {
         $size = Get-LocalItemSize -ItemPath $item -ShowStatus
         $itemSizes[$item] = $size
         $totalSize += $size
     }
     Write-Host "`r" + (" " * 50) + "`r"
-    Write-Host "You are about to $actionVerb $($sourceItems.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
-    Write-Host "From (PC)    : $(Split-Path $sourceItems[0] -Parent)" -ForegroundColor Yellow
-    Write-Host "To   (Android): $destPathFinal" -ForegroundColor Yellow
+    Write-Host "You are about to $ActionVerb $($Items.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
+    Write-Host "From (PC)    : $(Split-Path $Items[0] -Parent)" -ForegroundColor Yellow
+    Write-Host "To   (Android): $Destination" -ForegroundColor Yellow
     Write-Host "NOTE: ADB push does not support a detailed progress bar." -ForegroundColor DarkGray
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
-    if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
-
-    $successCount = 0; $failureCount = 0
-    [int]$processedItemCount = 0
-    $gcTriggerThreshold = 10
+    if ($confirm -eq 'n') { Write-Host " Action cancelled." -ForegroundColor Yellow; return $null }
     $updateInterval = switch ($totalSize) {
         { $_ -ge 1GB } { 500 }
         { $_ -ge 100MB } { 250 }
         default { 100 }
     }
-    foreach ($item in $sourceItems) {
-        if (-not (Test-AndroidPath $destPathFinal)) {
+    return [PSCustomObject]@{
+        ItemSizes      = $itemSizes
+        TotalSize      = $totalSize
+        UpdateInterval = $updateInterval
+    }
+}
+
+function Execute-PushTransfer {
+    param(
+        [array]$Items,
+        [hashtable]$ItemSizes,
+        [string]$Destination,
+        [switch]$Move,
+        [int]$UpdateInterval
+    )
+    $successCount = 0; $failureCount = 0
+    [int]$processedItemCount = 0
+    $gcTriggerThreshold = 10
+    foreach ($item in $Items) {
+        if (-not (Test-AndroidPath $Destination)) {
             Write-ErrorMessage -Operation "Invalid path"
             $failureCount++
             continue
         }
         $itemInfo = Get-Item -LiteralPath $item
         $sourceItemSafe = """$($itemInfo.FullName)"""
-        $destPathSafe = """$destPathFinal"""
-        
-        # Pipe to Out-String to prevent PowerShell from formatting stderr as an error object
-        $adbCommand = { 
-        param($source, $dest) 
-        # Wrap in cmd /c to make stderr redirection more robust against PowerShell's error formatting
-        cmd.exe /c "adb push `"$source`" `"$dest`" 2>&1" | Out-String 
-                       }
+        $destPathSafe = """$Destination"""
+
+        $adbCommand = {
+            param($source, $dest)
+            cmd.exe /c "adb push `$source `$dest 2>&1" | Out-String
+        }
         $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe)
 
-        $itemTotalSize = $itemSizes[$item]
-        $destItemPath = if ($destPathFinal.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($destPathFinal.TrimEnd('/')) + '/' + $itemInfo.Name }
+        $itemTotalSize = $ItemSizes[$item]
+        $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
         $itemStartTime = Get-Date
         Write-Host ""
         $lastReportedSize = 0L
@@ -834,7 +894,7 @@ function Push-FilesToAndroid {
                     }
                     Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
                 }
-                Start-Sleep -Milliseconds $updateInterval
+                Start-Sleep -Milliseconds $UpdateInterval
             }
         }
 
@@ -852,7 +912,7 @@ function Push-FilesToAndroid {
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
             Write-Host ($resultOutput | Out-String).Trim() -ForegroundColor Gray
 
-            Invalidate-DirectoryCache -DirectoryPath $destPathFinal
+            Invalidate-DirectoryCache -DirectoryPath $Destination
 
             if ($Move) {
                 Write-Host "   - Removing source item..." -NoNewline
@@ -875,9 +935,35 @@ function Push-FilesToAndroid {
             [System.GC]::Collect()
         }
     }
-    Write-Host "`n📊 TRANSFER SUMMARY: ✅ $successCount Successful, ❌ $failureCount Failed" -ForegroundColor Cyan
+    return [PSCustomObject]@{
+        SuccessCount = $successCount
+        FailureCount = $failureCount
+    }
 }
 
+function Show-PushSummary {
+    param([int]$SuccessCount, [int]$FailureCount)
+    Write-Host "`n📊 TRANSFER SUMMARY: ✅ $SuccessCount Successful, ❌ $FailureCount Failed" -ForegroundColor Cyan
+}
+ 
+function Push-FilesToAndroid {
+    param(
+        [switch]$Move,
+        [string]$DestinationPath
+    )
+    $actionVerb = if ($Move) { "MOVE" } else { "PUSH" }
+    Write-Host "`n📤 $actionVerb ITEMS TO ANDROID" -ForegroundColor Magenta
+
+    $selection = Select-PushItems -DestinationPath $DestinationPath
+    if (-not $selection) { return }
+
+    $confirmation = Confirm-PushTransfer -Items $selection.Items -Destination $selection.Destination -ActionVerb $actionVerb
+    if (-not $confirmation) { return }
+
+    $result = Execute-PushTransfer -Items $selection.Items -ItemSizes $confirmation.ItemSizes -Destination $selection.Destination -Move:$Move -UpdateInterval $confirmation.UpdateInterval
+
+    Show-PushSummary -SuccessCount $result.SuccessCount -FailureCount $result.FailureCount
+}
 
 # --- Other File System Functions ---
 
