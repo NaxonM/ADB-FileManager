@@ -904,6 +904,7 @@ function Select-PullItems {
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return $null }
     if (-not (Test-Path -LiteralPath $destinationFolder)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
+    $destinationFolder = [IO.Path]::GetFullPath($destinationFolder)
 
     return [PSCustomObject]@{
         State       = $State
@@ -975,7 +976,9 @@ function Execute-PullTransfer {
         $itemTotalSize = $ItemSizes[$item.FullPath]
 
         $adbCommand = { param($adbPath, $source, $dest, $serial) & $adbPath -s $serial pull $source $dest 2>&1 | Out-String }
-        $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $Destination, $State.DeviceStatus.SerialNumber)
+        $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @(
+            $script:AdbPath, $sourceItem, $destPathOnPC, $State.DeviceStatus.SerialNumber
+        )
 
         $itemStartTime = Get-Date
         Write-Host ""
