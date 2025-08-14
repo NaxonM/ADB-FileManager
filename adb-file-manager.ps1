@@ -36,18 +36,22 @@ Add-Type -AssemblyName System.Drawing
 
 # --- Global State and Configuration ---
 $script:LogFile = "ADB_Operations_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-$script:DeviceStatus = @{
-    IsConnected  = $false
-    DeviceName   = "No Device"
-    SerialNumber = ""
+
+# Encapsulated application state that will be threaded through functions.
+$script:State = @{
+    DeviceStatus = @{
+        IsConnected  = $false
+        DeviceName   = "No Device"
+        SerialNumber = ""
+    }
+    # Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
+    # Use an ordered dictionary so entries can be removed in least-recently-used order.
+    DirectoryCache = [ordered]@{}
+    # Maximum number of entries to keep in the directory cache
+    MaxDirectoryCacheEntries = 100
+    # Timestamp for the last device status check to prevent excessive ADB calls.
+    LastStatusUpdateTime = [DateTime]::MinValue
 }
-# Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
-# Use an ordered dictionary so entries can be removed in least-recently-used order.
-$script:DirectoryCache = [ordered]@{}
-# Maximum number of entries to keep in the directory cache
-$script:MaxDirectoryCacheEntries = 100
-# Timestamp for the last device status check to prevent excessive ADB calls.
-$script:LastStatusUpdateTime = [DateTime]::MinValue
 
 # --- Core ADB and Logging Functions ---
 
@@ -79,6 +83,7 @@ function Write-ErrorMessage {
 # Centralized function to execute simple ADB commands and get their direct output.
 function Invoke-AdbCommand {
     param(
+        [hashtable]$State = $script:State,
         [string]$Command,
         [switch]$HideOutput
     )
@@ -106,57 +111,62 @@ function Invoke-AdbCommand {
         # This makes the script instantly aware of a disconnected device without constant polling.
         if ($output -match "device not found|device offline|no devices/emulators found") {
             Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
-            $script:DeviceStatus.IsConnected = $false
-            $script:DeviceStatus.DeviceName   = "No Device"
-            $script:DeviceStatus.SerialNumber = ""
+            $State.DeviceStatus.IsConnected = $false
+            $State.DeviceStatus.DeviceName   = "No Device"
+            $State.DeviceStatus.SerialNumber = ""
             # By resetting the timestamp, we force Update-DeviceStatus to do a full check next time it's called.
-            $script:LastStatusUpdateTime = [DateTime]::MinValue
+            $State.LastStatusUpdateTime = [DateTime]::MinValue
             # Purge any cached directory entries since they're now invalid without a device.
-            $script:DirectoryCache.Clear()
+            $State.DirectoryCache.Clear()
             Write-Log "Directory cache cleared due to device loss." "WARN"
         }
     }
 
     if ($HideOutput) {
-        return [PSCustomObject]@{ Success = $success; Output  = "" }
+        return [PSCustomObject]@{ Success = $success; Output  = ""; State = $State }
     }
 
-    return [PSCustomObject]@{ Success = $success; Output  = $output.Trim() }
+    return [PSCustomObject]@{ Success = $success; Output  = $output.Trim(); State = $State }
 }
 
 # --- Device and Caching Functions ---
 
 # OPTIMIZED to only run expensive ADB commands periodically.
 function Update-DeviceStatus {
+    param([hashtable]$State)
+
     # If a device is connected and we checked less than 15 seconds ago, skip the check.
-    if ($script:DeviceStatus.IsConnected -and ((Get-Date) - $script:LastStatusUpdateTime).TotalSeconds -lt 15) {
-        return
+    if ($State.DeviceStatus.IsConnected -and ((Get-Date) - $State.LastStatusUpdateTime).TotalSeconds -lt 15) {
+        return $State
     }
 
     Write-Log "Performing full device status check." "DEBUG"
-    $result = Invoke-AdbCommand "devices"
+    $result = Invoke-AdbCommand -State $State -Command "devices"
+    $State = $result.State
     $firstDeviceLine = $result.Output -split '\r?\n' | Where-Object { $_ -match '\s+device$' } | Select-Object -First 1
 
     if ($firstDeviceLine) {
         $serialNumber = ($firstDeviceLine -split '\s+')[0]
-        $script:DeviceStatus.IsConnected = $true
-        $script:DeviceStatus.SerialNumber = $serialNumber.Trim()
-        
-        $deviceNameResult = Invoke-AdbCommand "-s $serialNumber shell getprop ro.product.model"
+        $State.DeviceStatus.IsConnected = $true
+        $State.DeviceStatus.SerialNumber = $serialNumber.Trim()
+
+        $deviceNameResult = Invoke-AdbCommand -State $State -Command "-s $serialNumber shell getprop ro.product.model"
+        $State = $deviceNameResult.State
         if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
-            $script:DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
+            $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
         } else {
-            $script:DeviceStatus.DeviceName = "Unknown Device"
+            $State.DeviceStatus.DeviceName = "Unknown Device"
         }
-        Write-Log "Device connected: $($script:DeviceStatus.DeviceName) ($($script:DeviceStatus.SerialNumber))" "INFO"
+        Write-Log "Device connected: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" "INFO"
     } else {
-        $script:DeviceStatus.IsConnected = $false
-        $script:DeviceStatus.DeviceName = "No Device"
-        $script:DeviceStatus.SerialNumber = ""
+        $State.DeviceStatus.IsConnected = $false
+        $State.DeviceStatus.DeviceName = "No Device"
+        $State.DeviceStatus.SerialNumber = ""
         Write-Log "No device connected." "INFO"
     }
     # Update the timestamp after a full check.
-  $script:LastStatusUpdateTime = (Get-Date)
+    $State.LastStatusUpdateTime = (Get-Date)
+    return $State
 }
 
 # Converts a path to Android-friendly format.
@@ -170,36 +180,44 @@ function ConvertTo-AndroidPath {
 
 # Invalidates the cache for a specific directory path.
 function Invalidate-DirectoryCache {
-    param([string]$DirectoryPath)
+    param(
+        [hashtable]$State,
+        [string]$DirectoryPath
+    )
 
     # Always normalize the path before interacting with the cache.
     $cacheKey = ConvertTo-AndroidPath $DirectoryPath
 
-    if ($script:DirectoryCache.Contains($cacheKey)) {
+    if ($State.DirectoryCache.Contains($cacheKey)) {
         Write-Log "CACHE INVALIDATION: Removing '$cacheKey' from cache." "INFO"
-        $script:DirectoryCache.Remove($cacheKey)
+        $State.DirectoryCache.Remove($cacheKey)
     }
+    return $State
 }
 
 # Gets the parent of an item and invalidates its cache.
 function Invalidate-ParentCache {
-     param([string]$ItemPath)
+     param(
+        [hashtable]$State,
+        [string]$ItemPath
+    )
     if (-not (Test-AndroidPath $ItemPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $State
     }
      # Normalize to forward slashes and remove any trailing slash
     $normalizedItemPath = ConvertTo-AndroidPath $ItemPath
-    if ($normalizedItemPath -eq "/") { return }
+    if ($normalizedItemPath -eq "/") { return $State }
 
     $lastSlashIndex = $normalizedItemPath.LastIndexOf('/')
     # If no slash or it's the only character, the parent is root.
     if ($lastSlashIndex -le 0) {
-        Invalidate-DirectoryCache -DirectoryPath "/"
+        $State = Invalidate-DirectoryCache -State $State -DirectoryPath "/"
     } else {
         $parentPath = $normalizedItemPath.Substring(0, $lastSlashIndex)
-        Invalidate-DirectoryCache -DirectoryPath $parentPath
+        $State = Invalidate-DirectoryCache -State $State -DirectoryPath $parentPath
     }
+    return $State
 }
 
 # Adds an entry to a cache and enforces a maximum number of entries.
@@ -281,6 +299,7 @@ function Test-ValidSelection {
 
 function Show-UIHeader {
     param(
+        [hashtable]$State,
         [string]$Title = "ADB FILE MANAGER",
         [string]$SubTitle
     )
@@ -296,15 +315,16 @@ function Show-UIHeader {
     }
     Write-Host ("║" + (" " * ($width - 2)) + "║") -ForegroundColor Cyan
     Write-Host ("╚" + ("═" * ($width - 2)) + "╝") -ForegroundColor Cyan
-    
-    Update-DeviceStatus
+
+    $State = Update-DeviceStatus -State $State
     $statusText = "🔌 Status: "
-    if ($script:DeviceStatus.IsConnected) {
-        Write-Host "$statusText $($script:DeviceStatus.DeviceName) ($($script:DeviceStatus.SerialNumber))" -ForegroundColor Green
+    if ($State.DeviceStatus.IsConnected) {
+        Write-Host "$statusText $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" -ForegroundColor Green
     } else {
         Write-ErrorMessage -Operation "Status" -Item "Disconnected" -Details "Please connect a device."
     }
     Write-Host ("─" * $width) -ForegroundColor Gray
+    return $State
 }
 
 function Format-Bytes {
@@ -372,6 +392,7 @@ function Show-InlineProgress {
 # Gets the size of multiple Android items (files/dirs) using an optimized single command for directories.
 function Get-AndroidItemsSize {
     param(
+        [hashtable]$State,
         [array]$Items
     )
     $totalSize = 0L
@@ -398,7 +419,8 @@ function Get-AndroidItemsSize {
     # If there are directories, query their sizes in one single, efficient command.
     if ($dirsToQuery.Count -gt 0) {
         $pathsString = $dirsToQuery -join " "
-        $sizeResult = Invoke-AdbCommand "shell du -sb $pathsString"
+        $sizeResult = Invoke-AdbCommand -State $State -Command "shell du -sb $pathsString"
+        $State = $sizeResult.State
         if ($sizeResult.Success -and $sizeResult.Output) {
             # The output lines look like: 5120	/sdcard/Download
             $lines = $sizeResult.Output -split '\r?\n'
@@ -433,7 +455,7 @@ function Get-AndroidItemsSize {
         Write-Host "⚠️  Warning: Unable to determine size for one or more directories. They have been set to 0." -ForegroundColor Yellow
     }
 
-    return [PSCustomObject]@{ TotalSize = $totalSize; ItemSizes = $itemSizes }
+    return [PSCustomObject]@{ State = $State; TotalSize = $totalSize; ItemSizes = $itemSizes }
 }
 
 function Get-LocalItemSize {
@@ -480,41 +502,44 @@ function Get-LocalItemSize {
 
 function Get-AndroidDirectoryContents {
     param(
+        [hashtable]$State,
         [string]$Path
     )
     # Normalize path for cache key consistency
     $cacheKey = ConvertTo-AndroidPath $Path
     if (-not (Test-AndroidPath $cacheKey)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return @()
+        return [PSCustomObject]@{ State = $State; Items = @() }
     }
 
     # Check cache first using the normalized key
-    if ($script:DirectoryCache.Contains($cacheKey)) {
+    if ($State.DirectoryCache.Contains($cacheKey)) {
         Write-Log "CACHE HIT: Returning cached contents for '$cacheKey'." "DEBUG"
-        $cached = $script:DirectoryCache[$cacheKey]
+        $cached = $State.DirectoryCache[$cacheKey]
         # Update order to reflect recent use
-        $script:DirectoryCache.Remove($cacheKey)
-        $script:DirectoryCache[$cacheKey] = $cached
-        return $cached
+        $State.DirectoryCache.Remove($cacheKey)
+        $State.DirectoryCache[$cacheKey] = $cached
+        return [PSCustomObject]@{ State = $State; Items = $cached }
     }
     Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG"
 
     # Canonicalize the path to resolve symbolic links before listing contents.
-    $canonicalResult = Invoke-AdbCommand "shell readlink -f '$cacheKey'"
-    $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) { 
+    $canonicalResult = Invoke-AdbCommand -State $State -Command "shell readlink -f '$cacheKey'"
+    $State = $canonicalResult.State
+    $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) {
         $canonicalResult.Output.Trim()
-    } else { 
+    } else {
         $cacheKey
     }
     if (-not (Test-AndroidPath $listPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return @()
+        return [PSCustomObject]@{ State = $State; Items = @() }
     }
     Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG"
 
     # Use the canonical path for the 'ls' command.
-    $result = Invoke-AdbCommand "shell ls -la '$listPath'"
+    $result = Invoke-AdbCommand -State $State -Command "shell ls -la '$listPath'"
+    $State = $result.State
 
     if (-not $result.Success) {
         Write-Host ""
@@ -555,22 +580,28 @@ function Get-AndroidDirectoryContents {
     }
     
     # Store the fresh result in the cache using the original path as the key
-    Add-ToCacheWithLimit -Cache $script:DirectoryCache -Key $cacheKey -Value $items -MaxEntries $script:MaxDirectoryCacheEntries
-    return $items
+    Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $cacheKey -Value $items -MaxEntries $State.MaxDirectoryCacheEntries
+    return [PSCustomObject]@{ State = $State; Items = $items }
 }
 
 function Select-PullItems {
-    param([string]$Path)
+    param(
+        [hashtable]$State,
+        [string]$Path
+    )
     $sourcePath = if ($Path) { $Path } else { Read-Host "➡️  Enter source path on Android to pull from (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return $null }
     if (-not (Test-AndroidPath $sourcePath)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
-    $sourceIsDirResult = Invoke-AdbCommand "shell ls -ld '$sourcePath'"
+    $sourceIsDirResult = Invoke-AdbCommand -State $State -Command "shell ls -ld '$sourcePath'"
+    $State = $sourceIsDirResult.State
     $isDir = $sourceIsDirResult.Success -and $sourceIsDirResult.Output.StartsWith('d')
 
     $itemsToPull = @()
     if ($isDir) {
-        $allItems = @(Get-AndroidDirectoryContents $sourcePath)
+        $res = Get-AndroidDirectoryContents -State $State -Path $sourcePath
+        $State = $res.State
+        $allItems = @($res.Items)
         if ($allItems.Count -eq 0) { Write-Host "🟡 Directory is empty or inaccessible." -ForegroundColor Yellow; return $null }
 
         Write-Host "`nItems available in '$($sourcePath)':" -ForegroundColor Cyan
@@ -587,7 +618,8 @@ function Select-PullItems {
         if ($null -eq $selectedIndices) { Write-ErrorMessage -Operation "Invalid selection"; return $null }
         $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
     } else {
-        $sizeResult = Invoke-AdbCommand "shell stat -c %s '$sourcePath'"
+        $sizeResult = Invoke-AdbCommand -State $State -Command "shell stat -c %s '$sourcePath'"
+        $State = $sizeResult.State
         $fileSize = if ($sizeResult.Success -and $sizeResult.Output -match '^\d+$') { [long]$sizeResult.Output } else { 0L }
         $itemName = $sourcePath.Split('/')[-1]
         $itemsToPull += [PSCustomObject]@{ Name = $itemName; FullPath = $sourcePath; Type = 'File'; Size = $fileSize }
@@ -600,6 +632,7 @@ function Select-PullItems {
     if (-not (Test-AndroidPath $destinationFolder)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
     return [PSCustomObject]@{
+        State       = $State
         Items       = $itemsToPull
         Destination = $destinationFolder
         SourcePath  = $sourcePath
@@ -609,6 +642,7 @@ function Select-PullItems {
 
 function Confirm-PullTransfer {
     param(
+        [hashtable]$State,
         [array]$Items,
         [string]$SourcePath,
         [string]$Destination,
@@ -618,7 +652,8 @@ function Confirm-PullTransfer {
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
     Write-Host "Calculating total size... Please wait." -NoNewline
 
-    $sizeInfo = Get-AndroidItemsSize -Items $Items
+    $sizeInfo = Get-AndroidItemsSize -State $State -Items $Items
+    $State = $sizeInfo.State
     $totalSize = $sizeInfo.TotalSize
     $itemSizes = $sizeInfo.ItemSizes
 
@@ -637,6 +672,7 @@ function Confirm-PullTransfer {
     }
 
     return [PSCustomObject]@{
+        State          = $State
         ItemSizes      = $itemSizes
         TotalSize      = $totalSize
         UpdateInterval = $updateInterval
@@ -645,6 +681,7 @@ function Confirm-PullTransfer {
 
 function Execute-PullTransfer {
     param(
+        [hashtable]$State,
         [array]$Items,
         [hashtable]$ItemSizes,
         [string]$Destination,
@@ -722,10 +759,11 @@ function Execute-PullTransfer {
 
             if ($Move) {
                 Write-Host "   - Removing source item..." -NoNewline
-                $deleteResult = Invoke-AdbCommand "shell rm -rf '$($item.FullPath)'"
+                $deleteResult = Invoke-AdbCommand -State $State -Command "shell rm -rf '$($item.FullPath)'"
+                $State = $deleteResult.State
                 if ($deleteResult.Success) {
                     Write-Host " ✅" -ForegroundColor Green
-                    Invalidate-ParentCache -ItemPath $item.FullPath
+                    $State = Invalidate-ParentCache -State $State -ItemPath $item.FullPath
                 } else {
                     Write-Host " " -NoNewline
                     Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
@@ -744,10 +782,11 @@ function Execute-PullTransfer {
     }
     $overallTimeTaken = ((Get-Date) - $overallStartTime).TotalSeconds
     return [PSCustomObject]@{
-        SuccessCount = $successCount
-        FailureCount = $failureCount
+        State          = $State
+        SuccessCount   = $successCount
+        FailureCount   = $failureCount
         CumulativeBytes = $cumulativeBytesTransferred
-        TimeTaken = $overallTimeTaken
+        TimeTaken      = $overallTimeTaken
     }
 }
 
@@ -766,21 +805,26 @@ function Show-PullSummary {
 
 function Pull-FilesFromAndroid {
     param(
+        [hashtable]$State,
         [string]$Path,
         [switch]$Move
     )
     $actionVerb = if ($Move) { "MOVE" } else { "PULL" }
     Write-Host "`n📥 $actionVerb FROM ANDROID" -ForegroundColor Magenta
 
-    $selection = Select-PullItems -Path $Path
-    if (-not $selection) { return }
+    $selection = Select-PullItems -State $State -Path $Path
+    if (-not $selection) { return $State }
+    $State = $selection.State
 
-    $confirmation = Confirm-PullTransfer -Items $selection.Items -SourcePath $selection.SourcePath -Destination $selection.Destination -ActionVerb $actionVerb -IsDirectory:$selection.IsDirectory
-    if (-not $confirmation) { return }
+    $confirmation = Confirm-PullTransfer -State $State -Items $selection.Items -SourcePath $selection.SourcePath -Destination $selection.Destination -ActionVerb $actionVerb -IsDirectory:$selection.IsDirectory
+    if (-not $confirmation) { return $State }
+    $State = $confirmation.State
 
-    $result = Execute-PullTransfer -Items $selection.Items -ItemSizes $confirmation.ItemSizes -Destination $selection.Destination -Move:$Move -UpdateInterval $confirmation.UpdateInterval
+    $result = Execute-PullTransfer -State $State -Items $selection.Items -ItemSizes $confirmation.ItemSizes -Destination $selection.Destination -Move:$Move -UpdateInterval $confirmation.UpdateInterval
+    $State = $result.State
 
     Show-PullSummary -SuccessCount $result.SuccessCount -FailureCount $result.FailureCount -CumulativeBytes $result.CumulativeBytes -TimeTaken $result.TimeTaken
+    return $State
 }
  
 function Select-PushItems {
@@ -849,6 +893,7 @@ function Confirm-PushTransfer {
 
 function Execute-PushTransfer {
     param(
+        [hashtable]$State,
         [array]$Items,
         [hashtable]$ItemSizes,
         [string]$Destination,
@@ -887,7 +932,8 @@ function Execute-PushTransfer {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
                     $currentSize = $lastReportedSize
-                    $sizeResult = Invoke-AdbCommand "shell du -sb '$destItemPath'"
+                    $sizeResult = Invoke-AdbCommand -State $State -Command "shell du -sb '$destItemPath'"
+                    $State = $sizeResult.State
                     if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
                         $currentSize = [long]$Matches[1]
                         $lastReportedSize = $currentSize
@@ -898,7 +944,8 @@ function Execute-PushTransfer {
             }
         }
 
-        $finalSizeResult = Invoke-AdbCommand "shell du -sb '$destItemPath'"
+        $finalSizeResult = Invoke-AdbCommand -State $State -Command "shell du -sb '$destItemPath'"
+        $State = $finalSizeResult.State
         $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
         Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
         Write-Host ""
@@ -912,7 +959,7 @@ function Execute-PushTransfer {
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
             Write-Host ($resultOutput | Out-String).Trim() -ForegroundColor Gray
 
-            Invalidate-DirectoryCache -DirectoryPath $Destination
+            $State = Invalidate-DirectoryCache -State $State -DirectoryPath $Destination
 
             if ($Move) {
                 Write-Host "   - Removing source item..." -NoNewline
@@ -936,6 +983,7 @@ function Execute-PushTransfer {
         }
     }
     return [PSCustomObject]@{
+        State        = $State
         SuccessCount = $successCount
         FailureCount = $failureCount
     }
@@ -948,6 +996,7 @@ function Show-PushSummary {
  
 function Push-FilesToAndroid {
     param(
+        [hashtable]$State,
         [switch]$Move,
         [string]$DestinationPath
     )
@@ -955,35 +1004,39 @@ function Push-FilesToAndroid {
     Write-Host "`n📤 $actionVerb ITEMS TO ANDROID" -ForegroundColor Magenta
 
     $selection = Select-PushItems -DestinationPath $DestinationPath
-    if (-not $selection) { return }
+    if (-not $selection) { return $State }
 
     $confirmation = Confirm-PushTransfer -Items $selection.Items -Destination $selection.Destination -ActionVerb $actionVerb
-    if (-not $confirmation) { return }
+    if (-not $confirmation) { return $State }
 
-    $result = Execute-PushTransfer -Items $selection.Items -ItemSizes $confirmation.ItemSizes -Destination $selection.Destination -Move:$Move -UpdateInterval $confirmation.UpdateInterval
+    $result = Execute-PushTransfer -State $State -Items $selection.Items -ItemSizes $confirmation.ItemSizes -Destination $selection.Destination -Move:$Move -UpdateInterval $confirmation.UpdateInterval
+    $State = $result.State
 
     Show-PushSummary -SuccessCount $result.SuccessCount -FailureCount $result.FailureCount
+    return $State
 }
 
 # --- Other File System Functions ---
 
 function Browse-AndroidFileSystem {
+    param([hashtable]$State)
     $currentPath = Read-Host "➡️  Enter starting path (default: /sdcard/)"
     if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "/sdcard/" }
     if (-not (Test-AndroidPath $currentPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $State
     }
 
-
     do {
-        Show-UIHeader -Title "FILE BROWSER"
+        $State = Show-UIHeader -State $State -Title "FILE BROWSER"
         Write-Host "📁 Browsing: $currentPath" -ForegroundColor White -BackgroundColor DarkCyan
         Write-Host ("─" * 62) -ForegroundColor Gray
 
         # Cast the result to an array to prevent errors when a directory has only one item.
-        $items = @(Get-AndroidDirectoryContents $currentPath)
-        
+        $res = Get-AndroidDirectoryContents -State $State -Path $currentPath
+        $State = $res.State
+        $items = @($res.Items)
+
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         for ($i = 0; $i -lt $items.Count; $i++) {
             $item = $items[$i]
@@ -999,19 +1052,19 @@ function Browse-AndroidFileSystem {
             }
             Write-Host (" [{0,2}] {1} {2}" -f ($i + 1), $icon, $item.Name) -ForegroundColor $color
         }
-        
+
         Write-Host ("─" * 62) -ForegroundColor Gray
         Write-Host "Actions: (c)reate, (p)ull, (u)pload, (r)efresh, (q)uit to menu" -ForegroundColor Gray
         $choice = Read-Host "`n➡️  Enter number to browse, or select an action"
 
         switch ($choice) {
-            "q" { return }
-            "c" { New-AndroidFolder -ParentPath $currentPath; Read-Host "`nPress Enter to continue..." }
-            "p" { Pull-FilesFromAndroid -Path $currentPath; Read-Host "`nPress Enter to continue..." }
-            "u" { Push-FilesToAndroid -DestinationPath $currentPath; Read-Host "`nPress Enter to continue..." }
+            "q" { return $State }
+            "c" { $State = New-AndroidFolder -State $State -ParentPath $currentPath; Read-Host "`nPress Enter to continue..." }
+            "p" { $State = Pull-FilesFromAndroid -State $State -Path $currentPath; Read-Host "`nPress Enter to continue..." }
+            "u" { $State = Push-FilesToAndroid -State $State -DestinationPath $currentPath; Read-Host "`nPress Enter to continue..." }
             "r" {
                 Write-Host "`n🔄 Refreshing directory..." -ForegroundColor Yellow
-                Invalidate-DirectoryCache -DirectoryPath $currentPath
+                $State = Invalidate-DirectoryCache -State $State -DirectoryPath $currentPath
                 Start-Sleep -Seconds 1
             }
             "0" {
@@ -1022,7 +1075,7 @@ function Browse-AndroidFileSystem {
                         $currentPath = $parentPath.Substring(0, $lastSlash)
                     } elseif ($lastSlash -eq 0) {
                         $currentPath = "/"
-                    } else { # No slash found
+                    } else {
                         $currentPath = "/"
                     }
                 }
@@ -1031,7 +1084,6 @@ function Browse-AndroidFileSystem {
                 if ($choice -match '^\d+$' -and [int]$choice -ge 1 -and [int]$choice -le $items.Count) {
                     $selectedIndex = [int]$choice - 1
                     $selectedItem = $items[$selectedIndex]
-                    # Allow browsing into directories and links
                     if ($selectedItem.Type -in "Directory", "Link") {
                         if (Test-AndroidPath $selectedItem.FullPath) {
                             $currentPath = $selectedItem.FullPath
@@ -1039,8 +1091,8 @@ function Browse-AndroidFileSystem {
                             Write-ErrorMessage -Operation "Invalid path"
                             Start-Sleep -Seconds 1
                         }
-                    } else { 
-                        Show-ItemActionMenu -Item $selectedItem 
+                    } else {
+                        $State = Show-ItemActionMenu -State $State -Item $selectedItem
                     }
                 } else {
                     Write-ErrorMessage -Operation "Invalid selection"
@@ -1052,27 +1104,35 @@ function Browse-AndroidFileSystem {
 }
 
 function New-AndroidFolder {
-    param([string]$ParentPath)
+    param(
+        [hashtable]$State,
+        [string]$ParentPath
+    )
     $folderName = Read-Host "➡️  Enter name for the new folder"
     if ([string]::IsNullOrWhiteSpace($folderName)) { Write-Host "🟡 Action cancelled: No name provided." -ForegroundColor Yellow; return }
     $fullPath = if ($ParentPath.EndsWith('/')) { "$ParentPath$folderName" } else { "$ParentPath/$folderName" }
     if (-not (Test-AndroidPath $fullPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $State
     }
     # Use single quotes for shell path
-    $result = Invoke-AdbCommand "shell mkdir -p '$fullPath'"
+    $result = Invoke-AdbCommand -State $State -Command "shell mkdir -p '$fullPath'"
+    $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully created folder: $fullPath" -ForegroundColor Green
-        Invalidate-ParentCache -ItemPath $fullPath
+        $State = Invalidate-ParentCache -State $State -ItemPath $fullPath
     }
     else { Write-ErrorMessage -Operation "Failed to create folder" -Item $fullPath -Details $result.Output }
+    return $State
 }
 
 function Show-ItemActionMenu {
-    param($Item)
+    param(
+        [hashtable]$State,
+        $Item
+    )
     while ($true) {
-        Show-UIHeader -Title "ITEM ACTIONS"
+        $State = Show-UIHeader -State $State -Title "ITEM ACTIONS"
         Write-Host "Selected Item: $($Item.FullPath)" -ForegroundColor White -BackgroundColor DarkMagenta
         Write-Host "---------------------------------"
         Write-Host " 1. Pull to PC (Copy)"
@@ -1082,69 +1142,79 @@ function Show-ItemActionMenu {
         Write-Host " 5. Back to browser"
         $action = Read-Host "`n➡️  Enter your choice (1-5)"
         switch ($action) {
-            "1" { Pull-FilesFromAndroid -Path $Item.FullPath; Read-Host "`nPress Enter to continue..."; break }
-            "2" { Pull-FilesFromAndroid -Path $Item.FullPath -Move; Read-Host "`nPress Enter to continue..."; break }
+            "1" { $State = Pull-FilesFromAndroid -State $State -Path $Item.FullPath; Read-Host "`nPress Enter to continue..."; break }
+            "2" { $State = Pull-FilesFromAndroid -State $State -Path $Item.FullPath -Move; Read-Host "`nPress Enter to continue..."; break }
             "3" {
-                Rename-AndroidItem -ItemPath $Item.FullPath
+                $State = Rename-AndroidItem -State $State -ItemPath $Item.FullPath
                 Read-Host "`nPress Enter to continue..."
-                return # Return to browser as item name has changed
+                return $State # Return to browser as item name has changed
             }
-            "4" { 
-                Remove-AndroidItem -ItemPath $Item.FullPath
+            "4" {
+                $State = Remove-AndroidItem -State $State -ItemPath $Item.FullPath
                 Read-Host "`nPress Enter to continue..."
-                return # Return to browser as item is gone
+                return $State # Return to browser as item is gone
             }
-            "5" { return }
+            "5" { return $State }
             default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
     }
 }
 
 function Remove-AndroidItem {
-    param([string]$ItemPath)
+    param(
+        [hashtable]$State,
+        [string]$ItemPath
+    )
     if (-not (Test-AndroidPath $ItemPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $State
     }
     $itemName = $ItemPath.Split('/')[-1]
     $confirmation = Read-Host "❓ Are you sure you want to PERMANENTLY DELETE '$itemName'? [y/N]"
-    if ($confirmation.ToLower() -ne 'y') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return }
+    if ($confirmation.ToLower() -ne 'y') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return $State }
     # Use single quotes for shell path
-    $result = Invoke-AdbCommand "shell rm -rf '$ItemPath'"
+    $result = Invoke-AdbCommand -State $State -Command "shell rm -rf '$ItemPath'"
+    $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully deleted '$itemName'." -ForegroundColor Green
-        Invalidate-ParentCache -ItemPath $ItemPath
+        $State = Invalidate-ParentCache -State $State -ItemPath $ItemPath
     }
     else { Write-ErrorMessage -Operation "Failed to delete" -Item $itemName -Details $result.Output }
+    return $State
 }
 
 function Rename-AndroidItem {
-    param([string]$ItemPath)
+    param(
+        [hashtable]$State,
+        [string]$ItemPath
+    )
     if (-not (Test-AndroidPath $ItemPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $State
     }
     $itemName = $ItemPath.Split('/')[-1]
     $newName = Read-Host "➡️  Enter the new name for '$itemName'"
     if ([string]::IsNullOrWhiteSpace($newName) -or $newName.Contains('/') -or $newName.Contains('\')) {
-        Write-ErrorMessage -Operation "Invalid name"; return
+        Write-ErrorMessage -Operation "Invalid name"; return $State
     }
     $parentPath = $ItemPath.Substring(0, $ItemPath.LastIndexOf('/'))
     $newItemPath = if ([string]::IsNullOrEmpty($parentPath)) { "/$newName" } else { "$parentPath/$newName" }
     if (-not (Test-AndroidPath $newItemPath)) {
         Write-ErrorMessage -Operation "Invalid path"
-        return
+        return $State
     }
 
     # Use single quotes for shell path
-    $result = Invoke-AdbCommand "shell mv '$ItemPath' '$newItemPath'"
+    $result = Invoke-AdbCommand -State $State -Command "shell mv '$ItemPath' '$newItemPath'"
+    $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully renamed to '$newName'." -ForegroundColor Green
         # Invalidate the old item's parent directory to refresh the browser view
-        Invalidate-ParentCache -ItemPath $ItemPath
+        $State = Invalidate-ParentCache -State $State -ItemPath $ItemPath
     } else {
         Write-ErrorMessage -Operation "Failed to rename" -Item $itemName -Details $result.Output
     }
+    return $State
 }
 
 # --- GUI Picker Functions ---
@@ -1179,14 +1249,15 @@ function Show-OpenFilePicker {
 # --- Main Menu and Execution Flow ---
 
 function Show-MainMenu {
+    param([hashtable]$State)
     while ($true) {
-        Show-UIHeader -SubTitle "MAIN MENU"
+        $State = Show-UIHeader -State $State -SubTitle "MAIN MENU"
 
-        if (-not $script:DeviceStatus.IsConnected) {
+        if (-not $State.DeviceStatus.IsConnected) {
             Write-Host "`n⚠️ No device connected. Please connect a device and ensure it's recognized by ADB." -ForegroundColor Yellow
             Write-Host "   Trying to reconnect in 5 seconds..."
             # Force a full status update on the next loop after sleeping
-            $script:LastStatusUpdateTime = [DateTime]::MinValue
+            $State.LastStatusUpdateTime = [DateTime]::MinValue
             Start-Sleep -Seconds 5
             continue
         }
@@ -1201,7 +1272,7 @@ function Show-MainMenu {
 
         $choice = Read-Host "➡️  Enter your choice"
 
-        if ($choice -in '1', '2', '3' -and -not $script:DeviceStatus.IsConnected) {
+        if ($choice -in '1', '2', '3' -and -not $State.DeviceStatus.IsConnected) {
             Write-Host ""
             Write-ErrorMessage -Operation "Cannot perform this action" -Details "No device connected."
             Read-Host "Press Enter to continue"
@@ -1209,13 +1280,13 @@ function Show-MainMenu {
         }
 
         switch ($choice) {
-            '1' { Browse-AndroidFileSystem }
-            '2' { Push-FilesToAndroid }
-            '3' { Pull-FilesFromAndroid }
-            'q' { return }
+            '1' { $State = Browse-AndroidFileSystem -State $State }
+            '2' { $State = Push-FilesToAndroid -State $State }
+            '3' { $State = Pull-FilesFromAndroid -State $State }
+            'q' { return $State }
             default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
-        
+
         if ($choice -in '2','3') {
             Read-Host "`nPress Enter to return to the main menu..."
         }
@@ -1235,7 +1306,8 @@ function Start-ADBTool {
     }
 
     Write-Log "ADB File Manager v4.2.0 Started" "INFO"
-    Show-MainMenu
+    $state = $script:State
+    $state = Show-MainMenu -State $state
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
 
