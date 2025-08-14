@@ -69,7 +69,13 @@ $script:State = @{
     # Maximum number of entries to keep in the directory cache
     MaxDirectoryCacheEntries = 100
     # Timestamp for the last device status check to prevent excessive ADB calls.
-    LastStatusUpdateTime = [DateTime]::MinValue
+    LastStatusUpdateTime = [DateTime]::MinValue;
+    # Information about host and device capabilities
+    Features = @{
+        ADBVersion   = ''
+        SupportsDuSb = $false
+        Checked      = $false
+    }
 }
 
 # --- Core ADB and Logging Functions ---
@@ -84,7 +90,7 @@ function Write-Log {
     )
 
     if ($SanitizePaths) {
-        $Message = [regex]::Replace($Message, '((?:[A-Za-z]:)?[\\/][^\s"']*)', {
+        $Message = [regex]::Replace($Message, '((?:[A-Za-z]:)?[\\/][^\s"'']*)', {
             param($m)
             $path = $m.Value
             $sep = $path.Contains('/') ? '/' : '\\'
@@ -166,6 +172,8 @@ function Invoke-AdbCommand {
             # Purge any cached directory entries since they're now invalid without a device.
             $State.DirectoryCache.Clear()
             Write-Log "Directory cache cleared due to device loss." "WARN"
+            $State.Features.Checked = $false
+            $State.Features.SupportsDuSb = $false
         }
     }
 
@@ -174,6 +182,44 @@ function Invoke-AdbCommand {
     }
 
     return [PSCustomObject]@{ Success = $success; Output  = $output.Trim(); State = $State }
+}
+
+# Validates ADB version and required device features.
+function Test-AdbFeatures {
+    param([hashtable]$State)
+
+    # Always determine the ADB version
+    $versionResult = Invoke-AdbCommand -State $State -Arguments @('version')
+    $State = $versionResult.State
+    if ($versionResult.Success -and $versionResult.Output -match 'Android Debug Bridge version\s+(?<ver>[0-9\.]+)') {
+        $State.Features.ADBVersion = $Matches.ver
+        try {
+            $current = [version]$Matches.ver
+            $required = [version]'1.0.41'
+            if ($current -lt $required) {
+                Write-Host "⚠️  Warning: ADB version $current is older than required $required. Some features may not work." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Log "Failed to parse ADB version '$($Matches.ver)'" "WARN"
+        }
+    } else {
+        Write-Log "Unable to determine ADB version from output: $($versionResult.Output)" "WARN"
+    }
+
+    # Only test device-specific features if a device is connected
+    if ($State.DeviceStatus.IsConnected) {
+        $duResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb','/data/local/tmp')
+        $State = $duResult.State
+        if ($duResult.Success -and $duResult.Output -match '^[0-9]+') {
+            $State.Features.SupportsDuSb = $true
+        } else {
+            $State.Features.SupportsDuSb = $false
+            Write-Host "⚠️  Warning: Your device does not support 'du -sb'. Directory size calculations may be slower or unavailable." -ForegroundColor Yellow
+        }
+        $State.Features.Checked = $true
+    }
+
+    return $State
 }
 
 # --- Device and Caching Functions ---
@@ -205,11 +251,16 @@ function Update-DeviceStatus {
             $State.DeviceStatus.DeviceName = "Unknown Device"
         }
         Write-Log "Device connected: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" "INFO"
+        if (-not $State.Features.Checked) {
+            $State = Test-AdbFeatures -State $State
+        }
     } else {
         $State.DeviceStatus.IsConnected = $false
         $State.DeviceStatus.DeviceName = "No Device"
         $State.DeviceStatus.SerialNumber = ""
         Write-Log "No device connected." "INFO"
+        $State.Features.Checked = $false
+        $State.Features.SupportsDuSb = $false
     }
     # Update the timestamp after a full check.
     $State.LastStatusUpdateTime = (Get-Date)
