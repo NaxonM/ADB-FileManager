@@ -853,11 +853,7 @@ function Select-PullItems {
 
         Write-Host "`nItems available in '$($sourcePath)':" -ForegroundColor Cyan
         for ($i = 0; $i -lt $allItems.Count; $i++) {
-            $icon = switch ($allItems[$i].Type) {
-                "Directory" { "📁" }
-                "File"      { "📄" }
-                default     { "🔗" }
-            }
+            $icon = Get-ItemEmoji -Name $allItems[$i].Name -Type $allItems[$i].Type
             Write-Host (" [{0,2}] {1} {2}" -f ($i+1), $icon, $allItems[$i].Name)
         }
         $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1-3,5 or 'all')"
@@ -1338,6 +1334,22 @@ function Push-FilesToAndroid {
 
 # --- Other File System Functions ---
 
+function Get-ItemEmoji {
+    param([string]$Name, [string]$Type)
+    if ($Type -eq 'Directory') { return '📁' }
+    if ($Type -eq 'Link')      { return '🔗' }
+    $ext = [IO.Path]::GetExtension($Name).ToLowerInvariant()
+    switch ($ext) {
+        { '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp' -contains $_ } { return '🖼️' }
+        { '.mp4', '.mkv', '.mov', '.avi' -contains $_ }                 { return '🎞️' }
+        { '.mp3', '.flac', '.wav', '.ogg' -contains $_ }                { return '🎵' }
+        { '.zip', '.rar', '.7z', '.tar', '.gz' -contains $_ }           { return '🗜️' }
+        '.pdf'                                                         { return '📕' }
+        { '.txt', '.md', '.log', '.ini', '.json', '.xml' -contains $_ } { return '📝' }
+        default                                                         { return '📄' }
+    }
+}
+
 function Browse-AndroidFileSystem {
     param([hashtable]$State)
     $currentPath = Read-Host "➡️  Enter starting path (default: /sdcard/)"
@@ -1360,11 +1372,7 @@ function Browse-AndroidFileSystem {
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         for ($i = 0; $i -lt $items.Count; $i++) {
             $item = $items[$i]
-            $icon = switch ($item.Type) {
-                "Directory" { "📁" }
-                "File"      { "📄" }
-                default     { "🔗" }
-            }
+            $icon = Get-ItemEmoji -Name $item.Name -Type $item.Type
             $color = switch ($item.Type) {
                 "Directory" { "Cyan" }
                 "Link"      { "Yellow" }
