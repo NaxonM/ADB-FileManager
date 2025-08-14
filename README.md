@@ -31,7 +31,7 @@ It's faster, smarter, and provides far more feedback than standard ADB commands.
 * **✨ User-Friendly Interface**:
     * **GUI Pickers**: Uses the familiar Windows dialogs for selecting local files and folders to push or as a destination for pulls.
     * **Clean UI**: A polished and clean header shows the connected device status at all times.
-    * **Detailed Logging**: All major operations are logged to a timestamped file for easy debugging.
+* **Detailed Logging**: All major operations are logged to a timestamped file for easy debugging. Supports log levels (`INFO`, `DEBUG`, `ERROR`) with optional path sanitization.
 
 ## Prerequisites
 
@@ -52,6 +52,8 @@ It's faster, smarter, and provides far more feedback than standard ADB commands.
     * Navigate to the directory where you saved the script and run it:
         ```powershell
         .\adb-file-manager.ps1
+
+    * To include debug-level output, run the script with the `-LogLevel DEBUG` parameter.
         ```
 4.  **Use the Menu**: The script will guide you through the available options. The most powerful features are in the **Browse Device Filesystem** menu.
 
