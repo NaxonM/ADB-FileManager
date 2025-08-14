@@ -351,18 +351,18 @@ function Add-ToCacheWithLimit {
 # Validates Android paths to prevent command injection
 function Test-AndroidPath {
     param([string]$Path)
-    $invalidChars = @(
-        [char]38,  # &
-        [char]124, # |
-        [char]96,  # `
-        [char]36,  # $
-        [char]40,  # (
-        [char]41,  # )
-        [char]39   # '
-    )
-    foreach ($ch in $invalidChars) {
-        if ($Path -and $Path.Contains($ch)) {
-            Write-ErrorMessage -Operation "Path contains invalid character" -Item $ch
+    if (-not $Path) { return $true }
+
+    foreach ($ch in $Path.ToCharArray()) {
+        if ($ch -eq "'") {
+            Write-ErrorMessage -Operation "Path contains single quote"
+            return $false
+        }
+
+        $code = [int][char]$ch
+        if ($code -lt 32 -or $code -eq 127) {
+            $hex = "0x{0:X2}" -f $code
+            Write-ErrorMessage -Operation "Path contains control character" -Item $hex
             return $false
         }
     }
