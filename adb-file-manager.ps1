@@ -977,7 +977,7 @@ function Confirm-PushTransfer {
     Write-Host "You are about to $ActionVerb $($Items.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
     Write-Host "From (PC)    : $(Split-Path $Items[0] -Parent)" -ForegroundColor Yellow
     Write-Host "To   (Android): $Destination" -ForegroundColor Yellow
-    Write-Host "NOTE: ADB push does not support a detailed progress bar." -ForegroundColor DarkGray
+    Write-Host "NOTE: Progress is shown only when 'du -sb' is supported on the device." -ForegroundColor DarkGray
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host " Action cancelled." -ForegroundColor Yellow; return $null }
     if     ($totalSize -ge 1GB)  { $updateInterval = 500 }
