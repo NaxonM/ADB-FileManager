@@ -275,11 +275,17 @@ function Update-DeviceStatus {
     }
 
     Write-Log "Performing full device status check." "DEBUG"
-    $result = Invoke-AdbCommand -State $State -Arguments @("devices") -NoSerial
+    $startResult = Invoke-AdbCommand -State $State -Arguments @('start-server') -NoSerial
+    $State = $startResult.State
+    $result = Invoke-AdbCommand -State $State -Arguments @('devices') -NoSerial
     $State = $result.State
     [string[]]$deviceLines = $result.Output -split '\r?\n' |
-        Select-Object -Skip 1 |
-        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() }
+
+    if ($deviceLines.Count -gt 0) {
+        Write-Host "`nCleaned device list:" -ForegroundColor Cyan
+        $deviceLines | ForEach-Object { Write-Host "  $_" }
+    }
 
     if ($deviceLines.Count -gt 0) {
         $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
