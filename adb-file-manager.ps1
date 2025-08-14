@@ -159,7 +159,13 @@ function Invoke-AdbCommand {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
-        foreach ($arg in $argList) { $null = $psi.ArgumentList.Add($arg) }
+        if ($PSVersionTable.PSVersion.Major -ge 6) {
+            foreach ($arg in $argList) { $null = $psi.ArgumentList.Add($arg) }
+        }
+        else {
+            # PowerShell 5.1: build argument string manually
+            $psi.Arguments = ($argList | ForEach-Object { [char]34 + $_ + [char]34 }) -join ' '
+        }
 
         $process = [System.Diagnostics.Process]::Start($psi)
 
