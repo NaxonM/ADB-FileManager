@@ -32,7 +32,7 @@
 
 # Script parameters
 param(
-    [ValidateSet('INFO','DEBUG','ERROR')]
+    [ValidateSet('INFO','DEBUG','WARN','ERROR')]
     [string]$LogLevel = 'INFO'
 )
 
