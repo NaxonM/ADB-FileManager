@@ -30,11 +30,24 @@
 
 #Requires -Version 5.1
 
+# Script parameters
+param(
+    [ValidateSet('INFO','DEBUG','ERROR')]
+    [string]$LogLevel = 'INFO'
+)
+
 # Load required assemblies for GUI pickers
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # --- Global State and Configuration ---
+$script:CurrentLogLevel = $LogLevel
+$script:LogLevelPriority = @{
+    DEBUG = 1
+    INFO  = 2
+    WARN  = 3
+    ERROR = 4
+}
 $script:LogFile = "ADB_Operations_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 # Encapsulated application state that will be threaded through functions.
@@ -59,8 +72,28 @@ $script:State = @{
 function Write-Log {
     param(
         [string]$Message,
-        [string]$Level = "INFO"
+        [ValidateSet('INFO','DEBUG','WARN','ERROR')]
+        [string]$Level = "INFO",
+        [switch]$SanitizePaths
     )
+
+    if ($SanitizePaths) {
+        $Message = [regex]::Replace($Message, '((?:[A-Za-z]:)?[\\/][^\s"']*)', {
+            param($m)
+            $path = $m.Value
+            $sep = $path.Contains('/') ? '/' : '\\'
+            $parts = $path -split '[\\/]+'
+            if ($parts.Length -gt 2) {
+                $parts[1..($parts.Length-2)] = '***'
+            }
+            return ($parts -join $sep)
+        })
+    }
+
+    if ($script:LogLevelPriority[$Level] -lt $script:LogLevelPriority[$script:CurrentLogLevel]) {
+        return
+    }
+
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logEntry = "[$timestamp] [$Level] $Message"
     Add-Content -Path $script:LogFile -Value $logEntry
@@ -87,7 +120,7 @@ function Invoke-AdbCommand {
         [string[]]$Arguments,
         [switch]$HideOutput
     )
-    Write-Log ("Executing ADB Command: adb {0}" -f ($Arguments -join ' ')) "DEBUG"
+    Write-Log ("Executing ADB Command: adb {0}" -f ($Arguments -join ' ')) "DEBUG" -SanitizePaths
 
     $stdout = ''
     $stderr = ''
@@ -114,7 +147,7 @@ function Invoke-AdbCommand {
     $output = if ($success) { ($stdout, $stderr | Where-Object { $_ }) -join "`n" } else { $stderr }
 
     if (-not $success) {
-        Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR"
+        Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR" -SanitizePaths
         # Smart Status Check: If a command fails, check if it's due to a disconnection.
         # This makes the script instantly aware of a disconnected device without constant polling.
         if ($output -match "device not found|device offline|no devices/emulators found") {
@@ -197,7 +230,7 @@ function Invalidate-DirectoryCache {
     $cacheKey = ConvertTo-AndroidPath $DirectoryPath
 
     if ($State.DirectoryCache.Contains($cacheKey)) {
-        Write-Log "CACHE INVALIDATION: Removing '$cacheKey' from cache." "INFO"
+        Write-Log "CACHE INVALIDATION: Removing '$cacheKey' from cache." "INFO" -SanitizePaths
         $State.DirectoryCache.Remove($cacheKey)
     }
     return $State
@@ -248,7 +281,7 @@ function Add-ToCacheWithLimit {
     while ($Cache.Count -gt $MaxEntries) {
         $oldestKey = ($Cache.Keys)[0]
         $Cache.Remove($oldestKey)
-        Write-Log "CACHE LIMIT EXCEEDED: Removed least recently used entry '$oldestKey'." "DEBUG"
+        Write-Log "CACHE LIMIT EXCEEDED: Removed least recently used entry '$oldestKey'." "DEBUG" -SanitizePaths
     }
 }
 
@@ -411,7 +444,7 @@ function Get-AndroidItemsSize {
     # Separate files and directories. Files already have their size from the 'ls' command.
     foreach ($item in $Items) {
         if (-not (Test-AndroidPath $item.FullPath)) {
-            Write-Log "Skipping item with unsafe path: $($item.FullPath)" "WARN"
+            Write-Log "Skipping item with unsafe path: $($item.FullPath)" "WARN" -SanitizePaths
             continue
         }
         if ($item.Type -eq 'Directory') {
@@ -442,7 +475,7 @@ function Get-AndroidItemsSize {
                         $itemSizes[$originalItem.FullPath] = $size
                         $totalSize += $size
                     } else {
-                         Write-Log "Could not match DU output path '$path' to any selected item." "WARN"
+                         Write-Log "Could not match DU output path '$path' to any selected item." "WARN" -SanitizePaths
                     }
                 }
             }
@@ -453,7 +486,7 @@ function Get-AndroidItemsSize {
     foreach($item in $Items) {
         if (-not $itemSizes.ContainsKey($item.FullPath)) {
             $itemSizes[$item.FullPath] = 0L
-            Write-Log "Could not determine size for '$($item.FullPath)'. Defaulting to 0." "WARN"
+            Write-Log "Could not determine size for '$($item.FullPath)'. Defaulting to 0." "WARN" -SanitizePaths
             if ($item.Type -eq 'Directory') { $failedSizeCalc = $true }
         }
     }
@@ -500,7 +533,7 @@ function Get-LocalItemSize {
             return $item.Length
         }
     } catch {
-        Write-Log "Could not get size for local item: $ItemPath. Error: $_" "WARN"
+        Write-Log "Could not get size for local item: $ItemPath. Error: $_" "WARN" -SanitizePaths
         return 0
     }
 }
@@ -521,14 +554,14 @@ function Get-AndroidDirectoryContents {
 
     # Check cache first using the normalized key
     if ($State.DirectoryCache.Contains($cacheKey)) {
-        Write-Log "CACHE HIT: Returning cached contents for '$cacheKey'." "DEBUG"
+        Write-Log "CACHE HIT: Returning cached contents for '$cacheKey'." "DEBUG" -SanitizePaths
         $cached = $State.DirectoryCache[$cacheKey]
         # Update order to reflect recent use
         $State.DirectoryCache.Remove($cacheKey)
         $State.DirectoryCache[$cacheKey] = $cached
         return [PSCustomObject]@{ State = $State; Items = $cached }
     }
-    Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG"
+    Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG" -SanitizePaths
 
     # Canonicalize the path to resolve symbolic links before listing contents.
     $canonicalResult = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$cacheKey'")
@@ -542,7 +575,7 @@ function Get-AndroidDirectoryContents {
         Write-ErrorMessage -Operation "Invalid path"
         return [PSCustomObject]@{ State = $State; Items = @() }
     }
-    Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG"
+    Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG" -SanitizePaths
 
     # Use the canonical path for the 'ls' command.
     $result = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-la', "'$listPath'")
@@ -572,7 +605,7 @@ function Get-AndroidDirectoryContents {
             # Always join with the original path for user context, not the canonical one
             $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
             if (-not (Test-AndroidPath $fullPath)) {
-                Write-Log "Skipping item with unsafe path: $fullPath" "WARN"
+                Write-Log "Skipping item with unsafe path: $fullPath" "WARN" -SanitizePaths
                 continue
             }
 
