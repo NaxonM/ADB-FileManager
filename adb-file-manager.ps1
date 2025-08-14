@@ -76,6 +76,8 @@ $script:State = @{
     # Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
     # Use an ordered dictionary so entries can be removed in least-recently-used order.
     DirectoryCache = [ordered]@{}
+    # Map of originally requested paths to their canonical cache keys
+    DirectoryCacheAliases = @{}
     # Maximum number of entries to keep in the directory cache
     MaxDirectoryCacheEntries = 100
     # Timestamp for the last device status check to prevent excessive ADB calls.
@@ -342,10 +344,24 @@ function Invalidate-DirectoryCache {
 
     # Always normalize the path before interacting with the cache.
     $cacheKey = ConvertTo-AndroidPath $DirectoryPath
+    $canonicalKey = if ($State.DirectoryCacheAliases.Contains($cacheKey)) {
+        $State.DirectoryCacheAliases[$cacheKey]
+    } else {
+        $cacheKey
+    }
 
-    if ($State.DirectoryCache.Contains($cacheKey)) {
-        Write-Log "CACHE INVALIDATION: Removing '$cacheKey' from cache." "INFO" -SanitizePaths
-        $State.DirectoryCache.Remove($cacheKey)
+    if ($State.DirectoryCache.Contains($canonicalKey)) {
+        Write-Log "CACHE INVALIDATION: Removing '$canonicalKey' from cache." "INFO" -SanitizePaths
+        $State.DirectoryCache.Remove($canonicalKey)
+    }
+
+    if ($State.DirectoryCacheAliases.Contains($cacheKey)) {
+        $State.DirectoryCacheAliases.Remove($cacheKey) | Out-Null
+    }
+    foreach ($alias in @($State.DirectoryCacheAliases.Keys)) {
+        if ($State.DirectoryCacheAliases[$alias] -eq $canonicalKey) {
+            $State.DirectoryCacheAliases.Remove($alias) | Out-Null
+        }
     }
     return $State
 }
@@ -382,7 +398,8 @@ function Add-ToCacheWithLimit {
         [hashtable]$Cache,
         [string]$Key,
         $Value,
-        [int]$MaxEntries
+        [int]$MaxEntries,
+        [hashtable]$Aliases
     )
 
     # If the key already exists, remove it so re-adding moves it to the end
@@ -395,6 +412,13 @@ function Add-ToCacheWithLimit {
     while ($Cache.Count -gt $MaxEntries) {
         $oldestKey = ($Cache.Keys)[0]
         $Cache.Remove($oldestKey)
+        if ($Aliases) {
+            foreach ($alias in @($Aliases.Keys)) {
+                if ($Aliases[$alias] -eq $oldestKey) {
+                    $Aliases.Remove($alias) | Out-Null
+                }
+            }
+        }
         Write-Log "CACHE LIMIT EXCEEDED: Removed least recently used entry '$oldestKey'." "DEBUG" -SanitizePaths
     }
 }
@@ -679,30 +703,37 @@ function Get-AndroidDirectoryContents {
         return [PSCustomObject]@{ State = $State; Items = @() }
     }
 
-    # Check cache first using the normalized key
-    if ($State.DirectoryCache.Contains($cacheKey)) {
-        Write-Log "CACHE HIT: Returning cached contents for '$cacheKey'." "DEBUG" -SanitizePaths
-        $cached = $State.DirectoryCache[$cacheKey]
-        # Update order to reflect recent use
-        $State.DirectoryCache.Remove($cacheKey)
-        $State.DirectoryCache[$cacheKey] = $cached
-        return [PSCustomObject]@{ State = $State; Items = $cached }
-    }
-    Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG" -SanitizePaths
-
-    # Canonicalize the path to resolve symbolic links before listing contents.
-    $canonicalResult = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$cacheKey'")
-    $State = $canonicalResult.State
-    $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) {
-        $canonicalResult.Output.Trim()
+    if ($State.DirectoryCacheAliases.Contains($cacheKey)) {
+        $listPath = $State.DirectoryCacheAliases[$cacheKey]
     } else {
-        $cacheKey
+        # Canonicalize the path to resolve symbolic links before listing contents.
+        $canonicalResult = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$cacheKey'")
+        $State = $canonicalResult.State
+        $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) {
+            $canonicalResult.Output.Trim()
+        } else {
+            $cacheKey
+        }
     }
+
     if (-not (Test-AndroidPath $listPath)) {
         Write-ErrorMessage -Operation "Invalid path"
         return [PSCustomObject]@{ State = $State; Items = @() }
     }
-    Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG" -SanitizePaths
+
+    $canonicalKey = ConvertTo-AndroidPath $listPath
+    $State.DirectoryCacheAliases[$cacheKey] = $canonicalKey
+
+    # Check cache using the canonical key
+    if ($State.DirectoryCache.Contains($canonicalKey)) {
+        Write-Log "CACHE HIT: Returning cached contents for '$canonicalKey' (requested as '$cacheKey')." "DEBUG" -SanitizePaths
+        $cached = $State.DirectoryCache[$canonicalKey]
+        # Update order to reflect recent use
+        $State.DirectoryCache.Remove($canonicalKey)
+        $State.DirectoryCache[$canonicalKey] = $cached
+        return [PSCustomObject]@{ State = $State; Items = $cached }
+    }
+    Write-Log "CACHE MISS: Fetching contents for '$canonicalKey' from device (requested as '$cacheKey')." "DEBUG" -SanitizePaths
 
     # Use the canonical path for the 'ls' command to get just names; details come from stat.
     $result = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-1A', "'$listPath'")
@@ -826,8 +857,8 @@ function Get-AndroidDirectoryContents {
         }
     }
     
-    # Store the fresh result in the cache using the original path as the key
-    Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $cacheKey -Value $items -MaxEntries $State.MaxDirectoryCacheEntries
+    # Store the fresh result in the cache using the canonical path as the key
+    Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $canonicalKey -Value $items -MaxEntries $State.MaxDirectoryCacheEntries -Aliases $State.DirectoryCacheAliases
     return [PSCustomObject]@{ State = $State; Items = $items }
 }
 
