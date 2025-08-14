@@ -133,10 +133,11 @@ function Invoke-AdbCommand {
     param(
         [hashtable]$State = $script:State,
         [string[]]$Arguments,
-        [switch]$HideOutput
+        [switch]$HideOutput,
+        [switch]$NoSerial
     )
     $argList = @()
-    if ($State.DeviceStatus.SerialNumber) {
+    if ($State.DeviceStatus.SerialNumber -and -not $NoSerial) {
         $argList += '-s'
         $argList += $State.DeviceStatus.SerialNumber
     }
@@ -253,12 +254,28 @@ function Update-DeviceStatus {
     }
 
     Write-Log "Performing full device status check." "DEBUG"
-    $result = Invoke-AdbCommand -State $State -Arguments @("devices")
+    $result = Invoke-AdbCommand -State $State -Arguments @("devices") -NoSerial
     $State = $result.State
-    $firstDeviceLine = $result.Output -split '\r?\n' | Where-Object { $_ -match '\s+device$' } | Select-Object -First 1
+    $deviceLines = $result.Output -split '\r?\n' | Where-Object { $_ -match '\s+device$' }
 
-    if ($firstDeviceLine) {
-        $serialNumber = ($firstDeviceLine -split '\s+')[0]
+    if ($deviceLines.Count -gt 0) {
+        $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
+        $serialNumber = $null
+        if ($State.DeviceStatus.SerialNumber -and ($serials -contains $State.DeviceStatus.SerialNumber)) {
+            $serialNumber = $State.DeviceStatus.SerialNumber
+        } else {
+            Write-Host "`nAvailable devices:" -ForegroundColor Cyan
+            for ($i = 0; $i -lt $serials.Count; $i++) {
+                Write-Host "  $($i + 1). $($serials[$i])"
+            }
+            $selection = Read-Host "➡️  Enter the number of the device to use"
+            $choice = 0
+            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $serials.Count) {
+                $choice = 1
+            }
+            $serialNumber = $serials[$choice - 1]
+        }
+
         $State.DeviceStatus.IsConnected = $true
         $State.DeviceStatus.SerialNumber = $serialNumber.Trim()
 
