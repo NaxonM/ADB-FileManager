@@ -516,7 +516,7 @@ function Get-AndroidItemsSize {
 
     # If there are directories, query their sizes in one single, efficient command.
     if ($dirsToQuery.Count -gt 0) {
-        $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb') + $dirsToQuery
+        $sizeResult = Invoke-AdbCommand -State $State -Arguments (@('shell','du','-sb') + $dirsToQuery)
         $State = $sizeResult.State
         if ($sizeResult.Success -and $sizeResult.Output) {
             # The output lines look like: 5120	/sdcard/Download
