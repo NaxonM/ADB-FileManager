@@ -726,7 +726,7 @@ function Select-PullItems {
 
     $destinationFolder = Show-FolderPicker "Select destination folder on PC"
     if (-not $destinationFolder) { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return $null }
-    if (-not (Test-AndroidPath $destinationFolder)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
+    if (-not (Test-Path -LiteralPath $destinationFolder)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
     return [PSCustomObject]@{
         State       = $State
