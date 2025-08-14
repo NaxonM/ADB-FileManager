@@ -254,10 +254,11 @@ function Update-DeviceStatus {
     }
 
     Write-Log "Performing full device status check." "DEBUG"
-    $result = Invoke-AdbCommand -State $State -Arguments @("devices", "-l") -NoSerial
+    $result = Invoke-AdbCommand -State $State -Arguments @("devices") -NoSerial
     $State = $result.State
-    $deviceLines = $result.Output -split '\r?\n' | Select-Object -Skip 1 |
-        Where-Object { $_ -match '\s+device\b' }
+    [string[]]$deviceLines = $result.Output -split '\r?\n' |
+        Select-Object -Skip 1 |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
     if ($deviceLines.Count -gt 0) {
         $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
@@ -278,7 +279,7 @@ function Update-DeviceStatus {
         }
 
         $State.DeviceStatus.IsConnected = $true
-        $State.DeviceStatus.SerialNumber = $serialNumber.Trim()
+        $State.DeviceStatus.SerialNumber = $serialNumber
 
         $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('shell', 'getprop', 'ro.product.model')
         $State = $deviceNameResult.State
