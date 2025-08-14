@@ -524,7 +524,8 @@ function Show-InlineProgress {
         [string]$Activity,
         [long]$CurrentValue,
         [long]$TotalValue,
-        [datetime]$StartTime
+        [datetime]$StartTime,
+        [switch]$ShowCancelMessage
     )
     if ($TotalValue -le 0) {
         $percent = 0
@@ -562,6 +563,7 @@ function Show-InlineProgress {
 
     $activityString = $Activity.PadRight(20).Substring(0, 20)
     $progressLine = "`r{0} [{1}] {2,3}% | {3,22} | {4,12} | ETR: {5}" -f $activityString, $progressBar, $displayPercent, $sizeText, $speedText, $etrText
+    if ($ShowCancelMessage) { $progressLine += " | Press Esc or Q to cancel" }
     Write-Host $progressLine -NoNewline
 }
 
@@ -980,6 +982,8 @@ function Execute-PullTransfer {
             $script:AdbPath, $sourceItem, $destPathOnPC, $State.DeviceStatus.SerialNumber
         )
 
+        Write-Host "Press Esc or Q to cancel..." -ForegroundColor Yellow
+
         $itemStartTime = Get-Date
         Write-Host ""
 
@@ -1024,7 +1028,7 @@ function Execute-PullTransfer {
                             }
                         } catch { }
                     }
-                    Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+                    Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
                 }
                 Start-Sleep -Milliseconds $UpdateInterval
             }
@@ -1039,7 +1043,7 @@ function Execute-PullTransfer {
 
         $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
         if ($finalSize -lt $lastReportedSize) { $finalSize = $lastReportedSize }
-        Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+        Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
         Write-Host ""
 
         $resultOutput = Receive-Job $job
@@ -1212,6 +1216,8 @@ function Execute-PushTransfer {
         }
         $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $destPath, $State.DeviceStatus.SerialNumber)
 
+        Write-Host "Press Esc or Q to cancel..." -ForegroundColor Yellow
+
         $itemTotalSize = $ItemSizes[$item]
         $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
         $itemStartTime = Get-Date
@@ -1245,7 +1251,7 @@ function Execute-PushTransfer {
                             $currentSize = [long]$Matches[1]
                             $lastReportedSize = $currentSize
                         }
-                        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+                        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
                     }
                     Start-Sleep -Milliseconds $UpdateInterval
                 }
@@ -1261,7 +1267,7 @@ function Execute-PushTransfer {
             $finalSizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
             $State = $finalSizeResult.State
             $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
-            Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+            Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
             Write-Host ""
         } else {
             $spinner = @('|','/','-','\\')
@@ -1284,7 +1290,7 @@ function Execute-PushTransfer {
                 if ($job.State -eq 'NotStarted') {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
-                    Write-Host -NoNewline ("`r{0} Pushing {1}..." -f $spinner[$spinIndex % $spinner.Length], $itemInfo.Name)
+                    Write-Host -NoNewline ("`r{0} Pushing {1}... (Press Esc or Q to cancel)" -f $spinner[$spinIndex % $spinner.Length], $itemInfo.Name)
                     $spinIndex++
                 }
                 Start-Sleep -Milliseconds $UpdateInterval
