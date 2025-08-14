@@ -764,7 +764,17 @@ function Get-AndroidDirectoryContents {
                 $type = switch ($typeChar) {
                     'd' { 'Directory' }
                     '-' { 'File' }
-                    'l' { 'Link' }
+                    'l' {
+                        $linkType = 'Link'
+                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
+                        $State = $target.State
+                        if ($target.Success -and $target.Output) {
+                            $targetLs = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$($target.Output.Trim())'")
+                            $State = $targetLs.State
+                            if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
+                        }
+                        $linkType
+                    }
                     default { 'Other' }
                 }
             }
