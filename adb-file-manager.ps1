@@ -758,12 +758,12 @@ function Get-AndroidDirectoryContents {
 
             $type = 'Other'
             $size = 0L
-            if ($lsResult.Success -and $lsResult.Output -match '^(?<type>[dl-])[rwx-]{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)') {
-                $typeChar = $Matches.type
-                $size = if ($typeChar -eq '-') { [long]$Matches.size } else { 0L }
-                $type = switch ($typeChar) {
-                    'd' { 'Directory' }
-                    '-' { 'File' }
+            if ($lsResult.Success -and -not [string]::IsNullOrWhiteSpace($lsResult.Output)) {
+                $typeChar = $lsResult.Output[0]
+                switch ($typeChar) {
+                    'd' {
+                        $type = 'Directory'
+                    }
                     'l' {
                         $linkType = 'Link'
                         $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
@@ -773,9 +773,17 @@ function Get-AndroidDirectoryContents {
                             $State = $targetLs.State
                             if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
                         }
-                        $linkType
+                        $type = $linkType
                     }
-                    default { 'Other' }
+                    '-' {
+                        $type = 'File'
+                        if ($lsResult.Output -match '^.{10}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)') {
+                            $size = [long]$Matches.size
+                        }
+                    }
+                    default {
+                        $type = 'Other'
+                    }
                 }
             }
 
