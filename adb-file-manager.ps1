@@ -1022,32 +1022,50 @@ function Execute-PushTransfer {
         $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
         $itemStartTime = Get-Date
         Write-Host ""
-        $lastReportedSize = 0L
-        $jobStart = Get-Date
-        $startTimeout = [TimeSpan]::FromSeconds(5)
-        if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+        if ($State.Features.SupportsDuSb) {
+            $lastReportedSize = 0L
+            $jobStart = Get-Date
+            $startTimeout = [TimeSpan]::FromSeconds(5)
+            if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                    if ($job.State -eq 'NotStarted') {
+                        if ((Get-Date) - $jobStart -gt $startTimeout) { break }
+                    } else {
+                        $currentSize = $lastReportedSize
+                        $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
+                        $State = $sizeResult.State
+                        if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
+                            $currentSize = [long]$Matches[1]
+                            $lastReportedSize = $currentSize
+                        }
+                        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+                    }
+                    Start-Sleep -Milliseconds $UpdateInterval
+                }
+            }
+
+            $finalSizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
+            $State = $finalSizeResult.State
+            $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
+            Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+            Write-Host ""
+        } else {
+            $spinner = @('|','/','-','\\')
+            $spinIndex = 0
+            $jobStart = Get-Date
+            $startTimeout = [TimeSpan]::FromSeconds(5)
             while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
                 if ($job.State -eq 'NotStarted') {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
-                    $currentSize = $lastReportedSize
-                    $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
-                    $State = $sizeResult.State
-                    if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
-                        $currentSize = [long]$Matches[1]
-                        $lastReportedSize = $currentSize
-                    }
-                    Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+                    Write-Host -NoNewline ("`r{0} Pushing {1}..." -f $spinner[$spinIndex % $spinner.Length], $itemInfo.Name)
+                    $spinIndex++
                 }
                 Start-Sleep -Milliseconds $UpdateInterval
             }
+            Write-Host "`rPushing $($itemInfo.Name)... done"
+            Write-Host ""
         }
-
-        $finalSizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
-        $State = $finalSizeResult.State
-        $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
-        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
-        Write-Host ""
 
         $resultOutput = Receive-Job $job
         $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'error:')
