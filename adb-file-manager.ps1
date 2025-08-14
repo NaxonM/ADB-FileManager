@@ -41,10 +41,16 @@ $PSMajorVersion = $PSVersionTable.PSVersion.Major
 $script:IsPSCore = $PSMajorVersion -ge 6
 $script:IsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 
-# Load GUI assemblies when running on Windows
-if ($script:IsWindows) {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
+# Load GUI assemblies when running on Windows PowerShell (Desktop edition)
+$script:CanUseGui = $false
+if ($script:IsWindows -and $PSVersionTable.PSEdition -eq 'Desktop') {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+        $script:CanUseGui = $true
+    } catch {
+        Write-Log "Failed to load GUI assemblies. Falling back to text prompts." "WARN"
+    }
 }
 
 # Capture the full path to the adb executable at startup
@@ -1476,7 +1482,7 @@ function Rename-AndroidItem {
 
 function Show-FolderPicker {
     param([string]$Description = "Select a folder")
-    if ($script:IsWindows) {
+    if ($script:CanUseGui) {
         $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
         $folderBrowser.Description = $Description
         $folderBrowser.ShowNewFolderButton = $true
@@ -1496,7 +1502,7 @@ function Show-OpenFilePicker {
         [string]$Filter = "All files (*.*)|*.*",
         [switch]$MultiSelect
     )
-    if ($script:IsWindows) {
+    if ($script:CanUseGui) {
         $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
         $fileDialog.Title = $Title
         $fileDialog.Filter = $Filter
