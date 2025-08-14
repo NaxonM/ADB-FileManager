@@ -36,12 +36,13 @@ param(
     [string]$LogLevel = 'INFO'
 )
 
-# Detect PowerShell edition at runtime and load appropriate assemblies
+# Detect platform and PowerShell edition at runtime
 $PSMajorVersion = $PSVersionTable.PSVersion.Major
 $script:IsPSCore = $PSMajorVersion -ge 6
+$script:IsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 
-# For Windows PowerShell (<6), rely on .NET Framework GUI assemblies
-if (-not $script:IsPSCore) {
+# Load GUI assemblies when running on Windows
+if ($script:IsWindows) {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 }
@@ -75,9 +76,11 @@ $script:State = @{
     LastStatusUpdateTime = [DateTime]::MinValue;
     # Information about host and device capabilities
     Features = @{
-        ADBVersion   = ''
-        SupportsDuSb = $false
-        Checked      = $false
+        ADBVersion         = ''
+        SupportsDuSb       = $false
+        Checked            = $false
+        SupportsStatC      = $null
+        WarnedStatFallback = $false
     }
 }
 
@@ -685,6 +688,16 @@ function Get-AndroidDirectoryContents {
     $items = @()
     $names = $result.Output -split '\r?\n' | Where-Object { $_ }
 
+    if ($null -eq $State.Features.SupportsStatC) {
+        $probe = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n','/')
+        $State = $probe.State
+        $State.Features.SupportsStatC = $probe.Success
+        if (-not $probe.Success -and -not $State.Features.WarnedStatFallback) {
+            Write-Log "Device does not support 'stat -c'; falling back to parsing 'ls -ld' output." "WARN"
+            $State.Features.WarnedStatFallback = $true
+        }
+    }
+
     foreach ($name in $names) {
         # Always join with the original path for user context, not the canonical one
         $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
@@ -694,19 +707,55 @@ function Get-AndroidDirectoryContents {
         }
 
         $statPath = if ($listPath.EndsWith('/')) { "$listPath$name" } else { "$listPath/$name" }
-        $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n', "'$statPath'")
-        $State = $statResult.State
+        if ($State.Features.SupportsStatC) {
+            $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n', "'$statPath'")
+            $State = $statResult.State
 
-        if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
-            $typeStr = $Matches.type
-            $type = switch -regex ($typeStr) {
-                '^directory$' { 'Directory' }
-                '^regular file$' { 'File' }
-                '^symbolic link$' { 'Link' }
-                default { 'Other' }
+            if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
+                $typeStr = $Matches.type
+                $type = switch -regex ($typeStr) {
+                    '^directory$' { 'Directory' }
+                    '^regular file$' { 'File' }
+                    '^symbolic link$' { 'Link' }
+                    default { 'Other' }
+                }
+
+                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+
+                $items += [PSCustomObject]@{
+                    Name        = $name.Trim()
+                    Type        = $type
+                    Permissions = ''
+                    FullPath    = $fullPath
+                    Size        = $size
+                }
             }
+            else {
+                $items += [PSCustomObject]@{
+                    Name        = $name.Trim()
+                    Type        = 'Other'
+                    Permissions = ''
+                    FullPath    = $fullPath
+                    Size        = 0L
+                }
+            }
+        }
+        else {
+            $lsResult = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$statPath'")
+            $State = $lsResult.State
 
-            $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+            $type = 'Other'
+            $size = 0L
+            if ($lsResult.Success -and $lsResult.Output -match '^(?<type>[dl-])[rwx-]{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)') {
+                $typeChar = $Matches.type
+                $size = if ($typeChar -eq '-') { [long]$Matches.size } else { 0L }
+                $type = switch ($typeChar) {
+                    'd' { 'Directory' }
+                    '-' { 'File' }
+                    'l' { 'Link' }
+                    default { 'Other' }
+                }
+            }
 
             $items += [PSCustomObject]@{
                 Name        = $name.Trim()
@@ -1374,10 +1423,7 @@ function Rename-AndroidItem {
 
 function Show-FolderPicker {
     param([string]$Description = "Select a folder")
-    if ($script:IsPSCore) {
-        $path = Read-Host "$Description (enter full path)"
-        if (Test-Path $path) { return $path } else { return $null }
-    } else {
+    if ($script:IsWindows) {
         $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
         $folderBrowser.Description = $Description
         $folderBrowser.ShowNewFolderButton = $true
@@ -1385,6 +1431,9 @@ function Show-FolderPicker {
             return $folderBrowser.SelectedPath
         }
         return $null
+    } else {
+        $path = Read-Host "$Description (enter full path)"
+        if (Test-Path $path) { return $path } else { return $null }
     }
 }
 
@@ -1394,16 +1443,7 @@ function Show-OpenFilePicker {
         [string]$Filter = "All files (*.*)|*.*",
         [switch]$MultiSelect
     )
-    if ($script:IsPSCore) {
-        $prompt = if ($MultiSelect) { "$Title (enter paths separated by commas)" } else { "$Title (enter path)" }
-        $input = Read-Host $prompt
-        if ([string]::IsNullOrWhiteSpace($input)) { return $null }
-        if ($MultiSelect) {
-            return $input.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        } else {
-            return $input.Trim()
-        }
-    } else {
+    if ($script:IsWindows) {
         $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
         $fileDialog.Title = $Title
         $fileDialog.Filter = $Filter
@@ -1412,6 +1452,15 @@ function Show-OpenFilePicker {
             return $fileDialog.FileNames
         }
         return $null
+    } else {
+        $prompt = if ($MultiSelect) { "$Title (enter paths separated by commas)" } else { "$Title (enter path)" }
+        $input = Read-Host $prompt
+        if ([string]::IsNullOrWhiteSpace($input)) { return $null }
+        if ($MultiSelect) {
+            return $input.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        } else {
+            return $input.Trim()
+        }
     }
 }
 
