@@ -46,6 +46,9 @@ if (-not $script:IsPSCore) {
     Add-Type -AssemblyName System.Drawing
 }
 
+# Capture the full path to the adb executable at startup
+$script:AdbPath = (Get-Command adb).Source
+
 # --- Global State and Configuration ---
 $script:CurrentLogLevel = $LogLevel
 $script:LogLevelPriority = @{
@@ -799,12 +802,12 @@ function Execute-PullTransfer {
             Write-ErrorMessage -Operation "Skipping" -Item $item.Name -Details "Invalid path"
             continue
         }
-        $sourceItemSafe = """$($item.FullPath)"""
+        $sourceItem = $item.FullPath
         $destPathOnPC = Join-Path $Destination $item.Name
         $itemTotalSize = $ItemSizes[$item.FullPath]
 
-        $adbCommand = { param($source, $dest, $serial) adb -s $serial pull $source $dest 2>&1 | Out-String }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $Destination, $State.DeviceStatus.SerialNumber)
+        $adbCommand = { param($adbPath, $source, $dest, $serial) & $adbPath -s $serial pull $source $dest 2>&1 | Out-String }
+        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $Destination, $State.DeviceStatus.SerialNumber)
 
         $itemStartTime = Get-Date
         Write-Host ""
@@ -1009,14 +1012,14 @@ function Execute-PushTransfer {
             continue
         }
         $itemInfo = Get-Item -LiteralPath $item
-        $sourceItemSafe = """$($itemInfo.FullName)"""
-        $destPathSafe = """$Destination"""
+        $sourceItem = $itemInfo.FullName
+        $destPath = $Destination
 
         $adbCommand = {
-            param($source, $dest, $serial)
-            cmd.exe /c "adb -s $serial push `$source `$dest 2>&1" | Out-String
+            param($adbPath, $source, $dest, $serial)
+            & $adbPath -s $serial push $source $dest 2>&1 | Out-String
         }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe, $State.DeviceStatus.SerialNumber)
+        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $destPath, $State.DeviceStatus.SerialNumber)
 
         $itemTotalSize = $ItemSizes[$item]
         $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
