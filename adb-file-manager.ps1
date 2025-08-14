@@ -756,8 +756,11 @@ function Push-FilesToAndroid {
     Write-Host "`n✨ CONFIRMATION" -ForegroundColor Cyan
     Write-Host "Calculating total size... Please wait." -NoNewline
     [long]$totalSize = 0
+    $itemSizes = @{}
     foreach ($item in $sourceItems) {
-        $totalSize += Get-LocalItemSize -ItemPath $item -ShowStatus
+        $size = Get-LocalItemSize -ItemPath $item -ShowStatus
+        $itemSizes[$item] = $size
+        $totalSize += $size
     }
     Write-Host "`r" + (" " * 50) + "`r"
     Write-Host "You are about to $actionVerb $($sourceItems.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
@@ -770,6 +773,11 @@ function Push-FilesToAndroid {
     $successCount = 0; $failureCount = 0
     [int]$processedItemCount = 0
     $gcTriggerThreshold = 10
+    $updateInterval = switch ($totalSize) {
+        { $_ -ge 1GB } { 500 }
+        { $_ -ge 100MB } { 250 }
+        default { 100 }
+    }
     foreach ($item in $sourceItems) {
         if (-not (Test-AndroidPath $destPathFinal)) {
             Write-Host "❌ Invalid path." -ForegroundColor Red
@@ -788,25 +796,34 @@ function Push-FilesToAndroid {
                        }
         $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe)
 
-        $spinner = @('|', '/', '-', '\')
-        $spinnerIndex = 0
+        $itemTotalSize = $itemSizes[$item]
+        $destItemPath = if ($destPathFinal.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($destPathFinal.TrimEnd('/')) + '/' + $itemInfo.Name }
+        $itemStartTime = Get-Date
         Write-Host ""
+        $lastReportedSize = 0L
         $jobStart = Get-Date
         $startTimeout = [TimeSpan]::FromSeconds(5)
-        $status = ""
         if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
             while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
                 if ($job.State -eq 'NotStarted') {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
-                    $status = "Pushing $($itemInfo.Name)... $($spinner[$spinnerIndex])"
-                    Write-Host "`r$status" -NoNewline
-                    $spinnerIndex = ($spinnerIndex + 1) % $spinner.Length
+                    $currentSize = $lastReportedSize
+                    $sizeResult = Invoke-AdbCommand "shell du -sb '$destItemPath'"
+                    if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
+                        $currentSize = [long]$Matches[1]
+                        $lastReportedSize = $currentSize
+                    }
+                    Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime
                 }
-                Start-Sleep -Milliseconds 150
+                Start-Sleep -Milliseconds $updateInterval
             }
         }
-        Write-Host "`r" + (" " * ($status.Length + 5)) + "`r"
+
+        $finalSizeResult = Invoke-AdbCommand "shell du -sb '$destItemPath'"
+        $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
+        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
+        Write-Host ""
 
         $resultOutput = Receive-Job $job
         $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'error:')
