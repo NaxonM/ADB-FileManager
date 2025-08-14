@@ -653,8 +653,8 @@ function Get-AndroidDirectoryContents {
     }
     Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG" -SanitizePaths
 
-    # Use the canonical path for the 'ls' command.
-    $result = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-la', "'$listPath'")
+    # Use the canonical path for the 'ls' command to get just names; details come from stat.
+    $result = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-1A', "'$listPath'")
     $State = $result.State
 
     if (-not $result.Success) {
@@ -664,31 +664,35 @@ function Get-AndroidDirectoryContents {
     }
 
     $items = @()
-    $lines = $result.Output -split '\r?\n' | Where-Object { $_ -and $_ -notlike 'total *' -and $_ -notlike '*No such file or directory*' }
+    $names = $result.Output -split '\r?\n' | Where-Object { $_ }
 
-    foreach ($line in $lines) {
-        if ($line -match '^(?<perms>[\w-]{10})\s+\d+\s+(?<owner>\S+)\s+(?<group>\S+)\s+(?<size>\d+)?\s+(?<date>\d{4}-\d{2}-\d{2}\s\d{2}:\d{2})\s+(?<name>.+?)(?:\s->\s.*)?$') {
-            $name = $Matches.name
-            $type = if ($Matches.perms.StartsWith('d')) { "Directory" } elseif ($Matches.perms.StartsWith('l')) { "Link" } else { "File" }
-            
-            if ($name -in ".", "..") { continue }
-            
-            $size = 0L
-            if ($type -eq 'File' -and -not [string]::IsNullOrEmpty($Matches.size)) {
-                $size = [long]$Matches.size
+    foreach ($name in $names) {
+        # Always join with the original path for user context, not the canonical one
+        $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
+        if (-not (Test-AndroidPath $fullPath)) {
+            Write-Log "Skipping item with unsafe path: $fullPath" "WARN" -SanitizePaths
+            continue
+        }
+
+        $statPath = if ($listPath.EndsWith('/')) { "$listPath$name" } else { "$listPath/$name" }
+        $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n', "'$statPath'")
+        $State = $statResult.State
+
+        if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
+            $typeStr = $Matches.type
+            $type = switch -regex ($typeStr) {
+                '^directory$' { 'Directory' }
+                '^regular file$' { 'File' }
+                '^symbolic link$' { 'Link' }
+                default { 'Other' }
             }
-            
-            # Always join with the original path for user context, not the canonical one
-            $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
-            if (-not (Test-AndroidPath $fullPath)) {
-                Write-Log "Skipping item with unsafe path: $fullPath" "WARN" -SanitizePaths
-                continue
-            }
+
+            $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
 
             $items += [PSCustomObject]@{
                 Name        = $name.Trim()
                 Type        = $type
-                Permissions = $Matches.perms
+                Permissions = ''
                 FullPath    = $fullPath
                 Size        = $size
             }
