@@ -154,10 +154,20 @@ function Invoke-AdbCommand {
         foreach ($arg in $argList) { $null = $psi.ArgumentList.Add($arg) }
 
         $process = [System.Diagnostics.Process]::Start($psi)
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        $exitCode = $process.ExitCode
+
+        if (-not $process.WaitForExit(120000)) {
+            Write-Log "ADB command timed out after 120 seconds. Killing process." "ERROR"
+            try { $process.Kill() } catch { }
+            $process.WaitForExit()
+            $stdout = ''
+            $stderr = 'ADB command timed out after 120 seconds.'
+            $exitCode = -1
+        }
+        else {
+            $stdout = $process.StandardOutput.ReadToEnd()
+            $stderr = $process.StandardError.ReadToEnd()
+            $exitCode = $process.ExitCode
+        }
     }
     finally {
         if ($process) { $process.Dispose() }
