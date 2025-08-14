@@ -1312,14 +1312,18 @@ function Execute-PushTransfer {
             Write-Host ""
         }
 
-        $resultOutput = Receive-Job $job
-        $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'error:')
+        $jobErrors = @()
+        $resultOutput = Receive-Job $job -ErrorVariable jobErrors -ErrorAction SilentlyContinue
+        if ($jobErrors) { $resultOutput += $jobErrors | ForEach-Object { $_.ToString() } }
+
+        $combinedOutput = ($resultOutput | Out-String).Trim()
+        $success = ($job.JobStateInfo.State -eq 'Completed' -and $combinedOutput -notmatch 'error:')
         Remove-Job $job
 
         if ($success) {
             $successCount++
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
-            Write-Host ($resultOutput | Out-String).Trim() -ForegroundColor Gray
+            Write-Host $combinedOutput -ForegroundColor Gray
 
             $State = Invalidate-DirectoryCache -State $State -DirectoryPath $Destination
 
@@ -1336,7 +1340,7 @@ function Execute-PushTransfer {
         } else {
             $failureCount++
             Write-Host ""
-            Write-ErrorMessage -Operation "FAILED to push" -Item $itemInfo.Name -Details $resultOutput
+            Write-ErrorMessage -Operation "FAILED to push" -Item $itemInfo.Name -Details $combinedOutput
         }
 
         $processedItemCount++
