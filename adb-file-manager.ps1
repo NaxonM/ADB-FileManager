@@ -84,21 +84,29 @@ function Write-ErrorMessage {
 function Invoke-AdbCommand {
     param(
         [hashtable]$State = $script:State,
-        [string]$Command,
+        [string[]]$Arguments,
         [switch]$HideOutput
     )
-    Write-Log "Executing ADB Command: adb $Command" "DEBUG"
+    Write-Log ("Executing ADB Command: adb {0}" -f ($Arguments -join ' ')) "DEBUG"
 
+    $stdout = ''
+    $stderr = ''
+    $exitCode = 1
     try {
-        # Using temporary files for stdout/stderr is more robust for capturing all output
-        $process = Start-Process adb -ArgumentList $Command -Wait -NoNewWindow -PassThru -RedirectStandardOutput "temp_stdout.txt" -RedirectStandardError "temp_stderr.txt"
-        $exitCode = $process.ExitCode
+        $psi = [System.Diagnostics.ProcessStartInfo]::new('adb')
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        foreach ($arg in $Arguments) { $null = $psi.ArgumentList.Add($arg) }
 
-        $stdout = Get-Content "temp_stdout.txt" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
-        $stderr = Get-Content "temp_stderr.txt" -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $process.StandardOutput.ReadToEnd()
+        $stderr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
     }
     finally {
-        Remove-Item "temp_stdout.txt", "temp_stderr.txt" -ErrorAction SilentlyContinue
+        if ($process) { $process.Dispose() }
     }
 
     $success = ($exitCode -eq 0)
@@ -141,7 +149,7 @@ function Update-DeviceStatus {
     }
 
     Write-Log "Performing full device status check." "DEBUG"
-    $result = Invoke-AdbCommand -State $State -Command "devices"
+    $result = Invoke-AdbCommand -State $State -Arguments @("devices")
     $State = $result.State
     $firstDeviceLine = $result.Output -split '\r?\n' | Where-Object { $_ -match '\s+device$' } | Select-Object -First 1
 
@@ -150,7 +158,7 @@ function Update-DeviceStatus {
         $State.DeviceStatus.IsConnected = $true
         $State.DeviceStatus.SerialNumber = $serialNumber.Trim()
 
-        $deviceNameResult = Invoke-AdbCommand -State $State -Command "-s $serialNumber shell getprop ro.product.model"
+        $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('-s', $serialNumber, 'shell', 'getprop', 'ro.product.model')
         $State = $deviceNameResult.State
         if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
             $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
@@ -418,8 +426,7 @@ function Get-AndroidItemsSize {
 
     # If there are directories, query their sizes in one single, efficient command.
     if ($dirsToQuery.Count -gt 0) {
-        $pathsString = $dirsToQuery -join " "
-        $sizeResult = Invoke-AdbCommand -State $State -Command "shell du -sb $pathsString"
+        $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb') + $dirsToQuery
         $State = $sizeResult.State
         if ($sizeResult.Success -and $sizeResult.Output) {
             # The output lines look like: 5120	/sdcard/Download
@@ -524,7 +531,7 @@ function Get-AndroidDirectoryContents {
     Write-Log "CACHE MISS: Fetching contents for '$cacheKey' from device." "DEBUG"
 
     # Canonicalize the path to resolve symbolic links before listing contents.
-    $canonicalResult = Invoke-AdbCommand -State $State -Command "shell readlink -f '$cacheKey'"
+    $canonicalResult = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$cacheKey'")
     $State = $canonicalResult.State
     $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) {
         $canonicalResult.Output.Trim()
@@ -538,7 +545,7 @@ function Get-AndroidDirectoryContents {
     Write-Log "Canonical path for listing: '$listPath' (from '$cacheKey')" "DEBUG"
 
     # Use the canonical path for the 'ls' command.
-    $result = Invoke-AdbCommand -State $State -Command "shell ls -la '$listPath'"
+    $result = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-la', "'$listPath'")
     $State = $result.State
 
     if (-not $result.Success) {
@@ -593,7 +600,7 @@ function Select-PullItems {
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return $null }
     if (-not (Test-AndroidPath $sourcePath)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
-    $sourceIsDirResult = Invoke-AdbCommand -State $State -Command "shell ls -ld '$sourcePath'"
+    $sourceIsDirResult = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$sourcePath'")
     $State = $sourceIsDirResult.State
     $isDir = $sourceIsDirResult.Success -and $sourceIsDirResult.Output.StartsWith('d')
 
@@ -618,7 +625,7 @@ function Select-PullItems {
         if ($null -eq $selectedIndices) { Write-ErrorMessage -Operation "Invalid selection"; return $null }
         $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
     } else {
-        $sizeResult = Invoke-AdbCommand -State $State -Command "shell stat -c %s '$sourcePath'"
+        $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%s', "'$sourcePath'")
         $State = $sizeResult.State
         $fileSize = if ($sizeResult.Success -and $sizeResult.Output -match '^\d+$') { [long]$sizeResult.Output } else { 0L }
         $itemName = $sourcePath.Split('/')[-1]
@@ -759,7 +766,7 @@ function Execute-PullTransfer {
 
             if ($Move) {
                 Write-Host "   - Removing source item..." -NoNewline
-                $deleteResult = Invoke-AdbCommand -State $State -Command "shell rm -rf '$($item.FullPath)'"
+                $deleteResult = Invoke-AdbCommand -State $State -Arguments @('shell','rm','-rf', "'$($item.FullPath)'")
                 $State = $deleteResult.State
                 if ($deleteResult.Success) {
                     Write-Host " ✅" -ForegroundColor Green
@@ -932,7 +939,7 @@ function Execute-PushTransfer {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
                     $currentSize = $lastReportedSize
-                    $sizeResult = Invoke-AdbCommand -State $State -Command "shell du -sb '$destItemPath'"
+                    $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
                     $State = $sizeResult.State
                     if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
                         $currentSize = [long]$Matches[1]
@@ -944,7 +951,7 @@ function Execute-PushTransfer {
             }
         }
 
-        $finalSizeResult = Invoke-AdbCommand -State $State -Command "shell du -sb '$destItemPath'"
+        $finalSizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
         $State = $finalSizeResult.State
         $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
         Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
@@ -1116,7 +1123,7 @@ function New-AndroidFolder {
         return $State
     }
     # Use single quotes for shell path
-    $result = Invoke-AdbCommand -State $State -Command "shell mkdir -p '$fullPath'"
+    $result = Invoke-AdbCommand -State $State -Arguments @('shell','mkdir','-p', "'$fullPath'")
     $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully created folder: $fullPath" -ForegroundColor Green
@@ -1173,7 +1180,7 @@ function Remove-AndroidItem {
     $confirmation = Read-Host "❓ Are you sure you want to PERMANENTLY DELETE '$itemName'? [y/N]"
     if ($confirmation.ToLower() -ne 'y') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return $State }
     # Use single quotes for shell path
-    $result = Invoke-AdbCommand -State $State -Command "shell rm -rf '$ItemPath'"
+    $result = Invoke-AdbCommand -State $State -Arguments @('shell','rm','-rf', "'$ItemPath'")
     $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully deleted '$itemName'." -ForegroundColor Green
@@ -1205,7 +1212,7 @@ function Rename-AndroidItem {
     }
 
     # Use single quotes for shell path
-    $result = Invoke-AdbCommand -State $State -Command "shell mv '$ItemPath' '$newItemPath'"
+    $result = Invoke-AdbCommand -State $State -Arguments @('shell','mv', "'$ItemPath'", "'$newItemPath'")
     $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully renamed to '$newName'." -ForegroundColor Green
