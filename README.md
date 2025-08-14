@@ -36,7 +36,7 @@ It's faster, smarter, and provides far more feedback than standard ADB commands.
 ## Prerequisites
 
 1.  **PowerShell 5.1 or PowerShell Core 6+**: Windows PowerShell provides GUI dialogs, while PowerShell Core is fully supported with console prompts. Comes standard with Windows 10 and later.
-2.  **Android SDK Platform Tools (ADB)**: You must have `adb.exe` available in your system's PATH. You can download the latest version from the [official Android developer website](https://developer.android.com/studio/releases/platform-tools).
+2.  **Android SDK Platform Tools (ADB)**: The script requires ADB. If `adb` is not found in your `PATH` at startup, it will automatically download and install the latest platform-tools to a user directory and append it to your `PATH`.
 
 ## Getting Started
 
@@ -52,6 +52,9 @@ It's faster, smarter, and provides far more feedback than standard ADB commands.
     * Navigate to the directory where you saved the script and run it:
         ```powershell
         .\adb-file-manager.ps1
+        ```
+
+    * On first run, if ADB isn't installed, the script will download it. After installation, reopen PowerShell or rerun the script.
 
     * To include debug-level output, run the script with the `-LogLevel DEBUG` parameter.
         ```

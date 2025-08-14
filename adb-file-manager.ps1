@@ -1671,14 +1671,57 @@ function Show-MainMenu {
     }
 }
 
+# --- ADB Setup ---
+function Ensure-Adb {
+    if (Get-Command adb -ErrorAction SilentlyContinue) {
+        return $true
+    }
+
+    Write-Host "⚠️ ADB not found. Installing Android SDK Platform Tools..." -ForegroundColor Yellow
+
+    $platform = if ($IsWindows) { 'windows' } else { 'linux' }
+    $url = "https://dl.google.com/android/repository/platform-tools-latest-$platform.zip"
+    $installDir = if ($IsWindows) {
+        Join-Path $env:USERPROFILE 'AppData\Local\Android\platform-tools'
+    } else {
+        Join-Path $HOME '.android/platform-tools'
+    }
+
+    try {
+        $tempZip = Join-Path ([IO.Path]::GetTempPath()) 'platform-tools.zip'
+        Invoke-WebRequest -Uri $url -OutFile $tempZip
+        $parent = Split-Path $installDir -Parent
+        if (-not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent | Out-Null }
+        Expand-Archive -Path $tempZip -DestinationPath $parent -Force
+        Remove-Item $tempZip -ErrorAction SilentlyContinue
+
+        $existing = [Environment]::GetEnvironmentVariable('PATH','User')
+        if ($existing) {
+            $pathSep = [IO.Path]::PathSeparator
+            if (-not $existing.Split($pathSep) -contains $installDir) {
+                [Environment]::SetEnvironmentVariable('PATH', "$existing$pathSep$installDir", 'User')
+            }
+        } else {
+            [Environment]::SetEnvironmentVariable('PATH', $installDir, 'User')
+        }
+
+        Write-Host "✅ ADB installed to $installDir" -ForegroundColor Green
+        Write-Host "Please reopen PowerShell or rerun this script." -ForegroundColor Yellow
+    }
+    catch {
+        Write-ErrorMessage -Operation "Failed to install ADB" -Details $_
+    }
+
+    return $false
+}
+
 # --- Main execution entry point ---
 function Start-ADBTool {
     # Set output encoding to handle special characters correctly
     $OutputEncoding = [System.Text.Encoding]::UTF8
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-    if (-not (Get-Command adb -ErrorAction SilentlyContinue)) {
-        Write-ErrorMessage -Operation "ADB not found in your system's PATH" -Details "Please install Android SDK Platform Tools and add its directory to your system's PATH environment variable."
+    if (-not (Ensure-Adb)) {
         Read-Host "Press Enter to exit."
         return
     }
