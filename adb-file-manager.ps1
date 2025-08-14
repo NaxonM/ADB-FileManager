@@ -97,9 +97,9 @@ function Write-Log {
             param($m)
             $path = $m.Value
             $sep = $path.Contains('/') ? '/' : '\\'
-            $parts = $path -split '[\\/]+'
-            if ($parts.Length -gt 2) {
-                $parts[1..($parts.Length-2)] = '***'
+            [string[]]$parts = $path -split '[\\/]+'
+            for ($i = 1; $i -lt $parts.Length - 1; $i++) {
+                $parts[$i] = '***'
             }
             return ($parts -join $sep)
         })
