@@ -74,8 +74,8 @@ $script:State = @{
         SerialNumber = ""
     }
     # Cache for directory listings to speed up browsing. Key = Path, Value = Directory Contents
-    # Use an ordered dictionary so entries can be removed in least-recently-used order.
-    DirectoryCache = [ordered]@{}
+    # Use an ordered, case-sensitive dictionary so entries can be removed in least-recently-used order.
+    DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
     # Map of originally requested paths to their canonical cache keys
     DirectoryCacheAliases = @{}
     # Maximum number of entries to keep in the directory cache
@@ -395,7 +395,7 @@ function Invalidate-ParentCache {
 # When the limit is exceeded, the least-recently-used entry is removed.
 function Add-ToCacheWithLimit {
     param(
-        [hashtable]$Cache,
+        [System.Collections.Specialized.OrderedDictionary]$Cache,
         [string]$Key,
         $Value,
         [int]$MaxEntries,
