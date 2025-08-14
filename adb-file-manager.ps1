@@ -36,9 +36,15 @@ param(
     [string]$LogLevel = 'INFO'
 )
 
-# Load required assemblies for GUI pickers
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+# Detect PowerShell edition at runtime and load appropriate assemblies
+$PSMajorVersion = $PSVersionTable.PSVersion.Major
+$script:IsPSCore = $PSMajorVersion -ge 6
+
+# For Windows PowerShell (<6), rely on .NET Framework GUI assemblies
+if (-not $script:IsPSCore) {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+}
 
 # --- Global State and Configuration ---
 $script:CurrentLogLevel = $LogLevel
@@ -705,11 +711,9 @@ function Confirm-PullTransfer {
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return $null }
 
-    $updateInterval = switch ($totalSize) {
-        { $_ -ge 1GB } { 500 }
-        { $_ -ge 100MB } { 250 }
-        default { 100 }
-    }
+    if     ($totalSize -ge 1GB)  { $updateInterval = 500 }
+    elseif ($totalSize -ge 100MB) { $updateInterval = 250 }
+    else                          { $updateInterval = 100 }
 
     return [PSCustomObject]@{
         State          = $State
@@ -919,11 +923,9 @@ function Confirm-PushTransfer {
     Write-Host "NOTE: ADB push does not support a detailed progress bar." -ForegroundColor DarkGray
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host " Action cancelled." -ForegroundColor Yellow; return $null }
-    $updateInterval = switch ($totalSize) {
-        { $_ -ge 1GB } { 500 }
-        { $_ -ge 100MB } { 250 }
-        default { 100 }
-    }
+    if     ($totalSize -ge 1GB)  { $updateInterval = 500 }
+    elseif ($totalSize -ge 100MB) { $updateInterval = 250 }
+    else                          { $updateInterval = 100 }
     return [PSCustomObject]@{
         ItemSizes      = $itemSizes
         TotalSize      = $totalSize
@@ -1261,13 +1263,18 @@ function Rename-AndroidItem {
 
 function Show-FolderPicker {
     param([string]$Description = "Select a folder")
-    $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
-    $folderBrowser.Description = $Description
-    $folderBrowser.ShowNewFolderButton = $true
-    if ($folderBrowser.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true })) -eq 'OK') {
-        return $folderBrowser.SelectedPath
+    if ($script:IsPSCore) {
+        $path = Read-Host "$Description (enter full path)"
+        if (Test-Path $path) { return $path } else { return $null }
+    } else {
+        $folderBrowser = New-Object System.Windows.Forms.FolderBrowserDialog
+        $folderBrowser.Description = $Description
+        $folderBrowser.ShowNewFolderButton = $true
+        if ($folderBrowser.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true })) -eq 'OK') {
+            return $folderBrowser.SelectedPath
+        }
+        return $null
     }
-    return $null
 }
 
 function Show-OpenFilePicker {
@@ -1276,14 +1283,25 @@ function Show-OpenFilePicker {
         [string]$Filter = "All files (*.*)|*.*",
         [switch]$MultiSelect
     )
-    $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
-    $fileDialog.Title = $Title
-    $fileDialog.Filter = $Filter
-    $fileDialog.Multiselect = $MultiSelect
-    if ($fileDialog.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true })) -eq 'OK') {
-        return $fileDialog.FileNames
+    if ($script:IsPSCore) {
+        $prompt = if ($MultiSelect) { "$Title (enter paths separated by commas)" } else { "$Title (enter path)" }
+        $input = Read-Host $prompt
+        if ([string]::IsNullOrWhiteSpace($input)) { return $null }
+        if ($MultiSelect) {
+            return $input.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        } else {
+            return $input.Trim()
+        }
+    } else {
+        $fileDialog = New-Object System.Windows.Forms.OpenFileDialog
+        $fileDialog.Title = $Title
+        $fileDialog.Filter = $Filter
+        $fileDialog.Multiselect = $MultiSelect
+        if ($fileDialog.ShowDialog((New-Object System.Windows.Forms.Form -Property @{TopMost = $true })) -eq 'OK') {
+            return $fileDialog.FileNames
+        }
+        return $null
     }
-    return $null
 }
 
 # --- Main Menu and Execution Flow ---

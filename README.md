@@ -29,13 +29,13 @@ It's faster, smarter, and provides far more feedback than standard ADB commands.
     * Rename files and folders.
     * Delete items with a safety confirmation prompt.
 * **✨ User-Friendly Interface**:
-    * **GUI Pickers**: Uses the familiar Windows dialogs for selecting local files and folders to push or as a destination for pulls.
+    * **GUI/Console Pickers**: On Windows PowerShell, uses familiar Windows dialogs for selecting local files and folders. When running on PowerShell Core (6+), falls back to console prompts for cross-platform compatibility.
     * **Clean UI**: A polished and clean header shows the connected device status at all times.
 * **Detailed Logging**: All major operations are logged to a timestamped file for easy debugging. Supports log levels (`INFO`, `DEBUG`, `ERROR`) with optional path sanitization.
 
 ## Prerequisites
 
-1.  **PowerShell 5.1+**: Comes standard with Windows 10 and later.
+1.  **PowerShell 5.1 or PowerShell Core 6+**: Windows PowerShell provides GUI dialogs, while PowerShell Core is fully supported with console prompts. Comes standard with Windows 10 and later.
 2.  **Android SDK Platform Tools (ADB)**: You must have `adb.exe` available in your system's PATH. You can download the latest version from the [official Android developer website](https://developer.android.com/studio/releases/platform-tools).
 
 ## Getting Started
