@@ -714,9 +714,21 @@ function Get-AndroidDirectoryContents {
             if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
                 $typeStr = $Matches.type
                 $type = switch -regex ($typeStr) {
-                    '^directory$' { 'Directory' }
-                    '^regular file$' { 'File' }
-                    '^symbolic link$' { 'Link' }
+                    '^directory$'       { 'Directory' }
+                    '^regular file$'    { 'File' }
+                    '^symbolic link.*$' {
+                        $linkType = 'Link'
+                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f',"'$statPath'")
+                        $State = $target.State
+                        if ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output)) {
+                            $targetInfo = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F',"'$($target.Output.Trim())'")
+                            $State = $targetInfo.State
+                            if ($targetInfo.Success -and $targetInfo.Output.Trim() -eq 'directory') {
+                                $linkType = 'Directory'
+                            }
+                        }
+                        $linkType
+                    }
                     default { 'Other' }
                 }
 
