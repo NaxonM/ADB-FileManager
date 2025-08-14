@@ -99,7 +99,11 @@ function Write-Log {
         $Message = [regex]::Replace($Message, '((?:[A-Za-z]:)?[\\/][^\s"'']*)', {
             param($m)
             $path = $m.Value
-            $sep = $path.Contains('/') ? '/' : '\\'
+            if ($path.Contains('/')) {
+                $sep = '/'
+            } else {
+                $sep = '\\'
+            }
             [string[]]$parts = $path -split '[\\/]+'
             for ($i = 1; $i -lt $parts.Length - 1; $i++) {
                 $parts[$i] = '***'
