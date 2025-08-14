@@ -958,8 +958,21 @@ function Execute-PullTransfer {
 
         $jobStart = Get-Date
         $startTimeout = [TimeSpan]::FromSeconds(5)
+        $cancelled = $false
         if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
             while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true).Key
+                    if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
+                        Stop-Job $job -ErrorAction SilentlyContinue
+                        try { Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+                        Write-Host "`r" + (' ' * 80) -NoNewline
+                        Write-Host "`r⛔ Cancelled pulling $($item.Name)" -ForegroundColor Yellow
+                        $failureCount++
+                        $cancelled = $true
+                        break
+                    }
+                }
                 if ($job.State -eq 'NotStarted') {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
@@ -985,6 +998,13 @@ function Execute-PullTransfer {
                 }
                 Start-Sleep -Milliseconds $UpdateInterval
             }
+        }
+
+        if ($cancelled) {
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+            $processedItemCount++
+            if (($processedItemCount % $gcTriggerThreshold) -eq 0) { [System.GC]::Collect() }
+            continue
         }
 
         $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
@@ -1166,12 +1186,25 @@ function Execute-PushTransfer {
         $destItemPath = if ($Destination.TrimEnd('/') -eq '') { '/' + $itemInfo.Name } else { ($Destination.TrimEnd('/')) + '/' + $itemInfo.Name }
         $itemStartTime = Get-Date
         Write-Host ""
+        $cancelled = $false
         if ($State.Features.SupportsDuSb) {
             $lastReportedSize = 0L
             $jobStart = Get-Date
             $startTimeout = [TimeSpan]::FromSeconds(5)
             if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
                 while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                    if ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true).Key
+                        if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
+                            Stop-Job $job -ErrorAction SilentlyContinue
+                            try { Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+                            Write-Host "`r" + (' ' * 80) -NoNewline
+                            Write-Host "`r⛔ Cancelled pushing $($itemInfo.Name)" -ForegroundColor Yellow
+                            $failureCount++
+                            $cancelled = $true
+                            break
+                        }
+                    }
                     if ($job.State -eq 'NotStarted') {
                         if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                     } else {
@@ -1188,6 +1221,13 @@ function Execute-PushTransfer {
                 }
             }
 
+            if ($cancelled) {
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                $processedItemCount++
+                if (($processedItemCount % $gcTriggerThreshold) -eq 0) { [System.GC]::Collect() }
+                continue
+            }
+
             $finalSizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
             $State = $finalSizeResult.State
             $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
@@ -1199,6 +1239,18 @@ function Execute-PushTransfer {
             $jobStart = Get-Date
             $startTimeout = [TimeSpan]::FromSeconds(5)
             while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true).Key
+                    if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
+                        Stop-Job $job -ErrorAction SilentlyContinue
+                        try { Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
+                        Write-Host "`r" + (' ' * 80) -NoNewline
+                        Write-Host "`r⛔ Cancelled pushing $($itemInfo.Name)" -ForegroundColor Yellow
+                        $failureCount++
+                        $cancelled = $true
+                        break
+                    }
+                }
                 if ($job.State -eq 'NotStarted') {
                     if ((Get-Date) - $jobStart -gt $startTimeout) { break }
                 } else {
@@ -1206,6 +1258,13 @@ function Execute-PushTransfer {
                     $spinIndex++
                 }
                 Start-Sleep -Milliseconds $UpdateInterval
+            }
+            if ($cancelled) {
+                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                Write-Host ""  # ensure newline if spinner was active
+                $processedItemCount++
+                if (($processedItemCount % $gcTriggerThreshold) -eq 0) { [System.GC]::Collect() }
+                continue
             }
             Write-Host "`rPushing $($itemInfo.Name)... done"
             Write-Host ""
