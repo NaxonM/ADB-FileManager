@@ -254,9 +254,10 @@ function Update-DeviceStatus {
     }
 
     Write-Log "Performing full device status check." "DEBUG"
-    $result = Invoke-AdbCommand -State $State -Arguments @("devices") -NoSerial
+    $result = Invoke-AdbCommand -State $State -Arguments @("devices", "-l") -NoSerial
     $State = $result.State
-    $deviceLines = $result.Output -split '\r?\n' | Where-Object { $_ -match '\s+device$' }
+    $deviceLines = $result.Output -split '\r?\n' | Select-Object -Skip 1 |
+        Where-Object { $_ -match '\s+device\b' }
 
     if ($deviceLines.Count -gt 0) {
         $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
@@ -265,15 +266,15 @@ function Update-DeviceStatus {
             $serialNumber = $State.DeviceStatus.SerialNumber
         } else {
             Write-Host "`nAvailable devices:" -ForegroundColor Cyan
-            for ($i = 0; $i -lt $serials.Count; $i++) {
-                Write-Host "  $($i + 1). $($serials[$i])"
+            for ($i = 0; $i -lt $deviceLines.Count; $i++) {
+                Write-Host "  $($i + 1). $($deviceLines[$i])"
             }
             $selection = Read-Host "➡️  Enter the number of the device to use"
             $choice = 0
-            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $serials.Count) {
+            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
                 $choice = 1
             }
-            $serialNumber = $serials[$choice - 1]
+            $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
         }
 
         $State.DeviceStatus.IsConnected = $true
