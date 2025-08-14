@@ -641,7 +641,7 @@ function Get-AndroidDirectoryContents {
     if (-not $result.Success) {
         Write-Host ""
         Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $result.Output
-        return @()
+        return [PSCustomObject]@{ State = $State; Items = @() }
     }
 
     $items = @()
