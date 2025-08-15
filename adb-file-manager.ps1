@@ -33,17 +33,20 @@
 # Script parameters
 param(
     [ValidateSet('INFO','DEBUG','WARN','ERROR')]
-    [string]$LogLevel = 'INFO'
+    [string]$LogLevel = 'INFO',
+    [switch]$NoGui,
+    [switch]$WhatIf,
+    [switch]$JsonLog
 )
 
 # Detect platform and PowerShell edition at runtime
 $PSMajorVersion = $PSVersionTable.PSVersion.Major
 $script:IsPSCore = $PSMajorVersion -ge 6
-$script:IsWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
+Set-Variable -Name IsWindows -Scope Script -Value ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) -Force
 
 # Load GUI assemblies when running on Windows PowerShell (Desktop edition)
 $script:CanUseGui = $false
-if ($script:IsWindows -and $PSVersionTable.PSEdition -eq 'Desktop') {
+if (-not $NoGui -and $script:IsWindows -and $PSVersionTable.PSEdition -eq 'Desktop') {
     try {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
@@ -54,7 +57,11 @@ if ($script:IsWindows -and $PSVersionTable.PSEdition -eq 'Desktop') {
 }
 
 # Capture the full path to the adb executable at startup
-$script:AdbPath = (Get-Command adb).Source
+try {
+    $script:AdbPath = (Get-Command adb -ErrorAction Stop).Source
+} catch {
+    $script:AdbPath = $null
+}
 
 # --- Global State and Configuration ---
 $script:CurrentLogLevel = $LogLevel
@@ -65,6 +72,7 @@ $script:LogLevelPriority = @{
     ERROR = 4
 }
 $script:LogFile = "ADB_Operations_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$script:JsonLogFile = [System.IO.Path]::ChangeExtension($script:LogFile, 'json')
 
 # Encapsulated application state that will be threaded through functions.
 $script:State = @{
@@ -89,6 +97,15 @@ $script:State = @{
         Checked            = $false
         SupportsStatC      = $null
         WarnedStatFallback = $false
+    }
+    Config = @{
+        DefaultTimeoutMs             = 120000
+        SafeRoot                     = '/sdcard'
+        VerboseLists                 = $false
+        LargeDeleteConfirmThresholdMB = 100
+        AllowUnsafeOps               = $false
+        EnableJsonLog                = $JsonLog.IsPresent
+        WhatIf                       = $WhatIf.IsPresent
     }
 }
 
@@ -126,7 +143,16 @@ function Write-Log {
 
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logEntry = "[$timestamp] [$Level] $Message"
-    Add-Content -Path $script:LogFile -Value $logEntry
+
+    if (-not (Test-Path -LiteralPath $script:LogFile)) {
+        "" | Out-File -FilePath $script:LogFile -Encoding utf8
+    }
+    Add-Content -Path $script:LogFile -Value $logEntry -Encoding utf8
+    if ($script:State.Config.EnableJsonLog) {
+        $jsonObj = @{ timestamp = $timestamp; level = $Level; message = $Message }
+        $jsonLine = $jsonObj | ConvertTo-Json -Compress
+        Add-Content -Path $script:JsonLogFile -Value $jsonLine -Encoding utf8
+    }
 }
 
 # Writes a formatted error message to the console.
@@ -143,13 +169,28 @@ function Write-ErrorMessage {
     Write-Host $message -ForegroundColor Red -NoNewline:$NoNewline
 }
 
+# Returns the path to the ADB executable, caching the result for reuse.
+function Get-AdbExe {
+    if ($script:AdbPath) { return $script:AdbPath }
+    try {
+        $cmd = Get-Command adb -ErrorAction Stop
+        $script:AdbPath = $cmd.Source
+        return $script:AdbPath
+    } catch {
+        return 'adb'
+    }
+}
+
 # Centralized function to execute simple ADB commands and get their direct output.
 function Invoke-AdbCommand {
     param(
         [hashtable]$State = $script:State,
         [string[]]$Arguments,
         [switch]$HideOutput,
-        [switch]$NoSerial
+        [switch]$NoSerial,
+        [int]$TimeoutMs = $State.Config.DefaultTimeoutMs,
+        [switch]$RawOutput,
+        [bool]$MergeStdErrOnSuccess = $true
     )
     $argList = @()
     if ($State.DeviceStatus.SerialNumber -and -not $NoSerial) {
@@ -157,13 +198,29 @@ function Invoke-AdbCommand {
         $argList += $State.DeviceStatus.SerialNumber
     }
     if ($Arguments) { $argList += $Arguments }
-    Write-Log ("Executing ADB Command: adb {0}" -f ($argList -join ' ')) "DEBUG" -SanitizePaths
+    $adbExe = Get-AdbExe
+    Write-Log ("Executing ADB Command: {0} {1}" -f $adbExe, ($argList -join ' ')) "DEBUG" -SanitizePaths
+
+    $destructive = $false
+    if ($Arguments) {
+        $cmd = $Arguments[0]
+        if ($cmd -in @('push','pull')) { $destructive = $true }
+        elseif ($cmd -eq 'shell' -and $Arguments.Count -gt 1 -and $Arguments[1] -in @('rm','mv','cp')) { $destructive = $true }
+    }
+    if ($State.Config.WhatIf -and $destructive) {
+        Write-Host "[WhatIf] $adbExe $($argList -join ' ')" -ForegroundColor Yellow
+        Write-Log ("[WhatIf] {0} {1}" -f $adbExe, ($argList -join ' ')) 'INFO' -SanitizePaths
+        if ($RawOutput) {
+            return [PSCustomObject]@{ Success = $true; StdOut = ''; StdErr = ''; ExitCode = 0; State = $State }
+        }
+        return [PSCustomObject]@{ Success = $true; Output = ''; State = $State }
+    }
 
     $stdout = ''
     $stderr = ''
     $exitCode = 1
     try {
-        $psi = [System.Diagnostics.ProcessStartInfo]::new('adb')
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($adbExe)
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.UseShellExecute = $false
@@ -177,12 +234,12 @@ function Invoke-AdbCommand {
 
         $process = [System.Diagnostics.Process]::Start($psi)
 
-        if (-not $process.WaitForExit(120000)) {
-            Write-Log "ADB command timed out after 120 seconds. Killing process." "ERROR"
+        if (-not $process.WaitForExit($TimeoutMs)) {
+            Write-Log "ADB command timed out after $TimeoutMs ms. Killing process." "ERROR"
             try { $process.Kill() } catch { }
             $process.WaitForExit()
             $stdout = ''
-            $stderr = 'ADB command timed out after 120 seconds.'
+            $stderr = "ADB command timed out after $TimeoutMs ms."
             $exitCode = -1
         }
         else {
@@ -196,8 +253,32 @@ function Invoke-AdbCommand {
     }
 
     $success = ($exitCode -eq 0)
+
+    if ($RawOutput) {
+        if ($success -and $MergeStdErrOnSuccess) {
+            $stdout = ($stdout, $stderr | Where-Object { $_ }) -join "`n"
+            $stderr = ''
+        }
+        if (-not $success) {
+            Write-Log "ADB command failed with exit code $exitCode. Error: $stderr" "ERROR" -SanitizePaths
+            if ($stderr -match "device not found|device offline|no devices/emulators found") {
+                Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
+                $State.DeviceStatus.IsConnected = $false
+                $State.DeviceStatus.DeviceName   = "No Device"
+                $State.DeviceStatus.SerialNumber = ""
+                $State.LastStatusUpdateTime = [DateTime]::MinValue
+                $State.DirectoryCache.Clear()
+                Write-Log "Directory cache cleared due to device loss." "WARN"
+                $State.Features.Checked = $false
+                $State.Features.SupportsDuSb = $false
+            }
+        }
+        if ($HideOutput) { return [PSCustomObject]@{ Success = $success; StdOut = ''; StdErr = ''; ExitCode = $exitCode; State = $State } }
+        return [PSCustomObject]@{ Success = $success; StdOut = $stdout.TrimEnd(); StdErr = $stderr.TrimEnd(); ExitCode = $exitCode; State = $State }
+    }
+
     # Some successful commands (like pull) write to stderr, so we combine them on success.
-    $output = if ($success) { ($stdout, $stderr | Where-Object { $_ }) -join "`n" } else { $stderr }
+    $output = if ($success -and $MergeStdErrOnSuccess) { ($stdout, $stderr | Where-Object { $_ }) -join "`n" } else { if ($success) { $stdout } else { $stderr } }
 
     if (-not $success) {
         Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR" -SanitizePaths
@@ -223,6 +304,25 @@ function Invoke-AdbCommand {
     }
 
     return [PSCustomObject]@{ Success = $success; Output  = $output.Trim(); State = $State }
+}
+
+# Starts an ADB process with redirected output, returning the process handle.
+function Start-AdbProcess {
+    param(
+        [hashtable]$State = $script:State,
+        [string[]]$Arguments,
+        [string]$StdOutPath,
+        [string]$StdErrPath,
+        [switch]$NoSerial
+    )
+    $argList = @()
+    if ($State.DeviceStatus.SerialNumber -and -not $NoSerial) {
+        $argList += '-s'
+        $argList += $State.DeviceStatus.SerialNumber
+    }
+    if ($Arguments) { $argList += $Arguments }
+    $adbExe = Get-AdbExe
+    return Start-Process -FilePath $adbExe -ArgumentList $argList -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru -NoNewWindow
 }
 
 # Validates ADB version and required device features.
@@ -283,26 +383,27 @@ function Update-DeviceStatus {
         Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() }
 
     if ($deviceLines.Count -gt 0) {
-        Write-Host "`nCleaned device list:" -ForegroundColor Cyan
-        $deviceLines | ForEach-Object { Write-Host "  $_" }
+        Write-Log "Detected devices: $($deviceLines -join ', ')" "DEBUG"
     }
 
     if ($deviceLines.Count -gt 0) {
         $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
-        $serialNumber = $null
-        if ($State.DeviceStatus.SerialNumber -and ($serials -contains $State.DeviceStatus.SerialNumber)) {
-            $serialNumber = $State.DeviceStatus.SerialNumber
-        } else {
-            Write-Host "`nAvailable devices:" -ForegroundColor Cyan
-            for ($i = 0; $i -lt $deviceLines.Count; $i++) {
-                Write-Host "  $($i + 1). $($deviceLines[$i])"
+        $serialNumber = $State.DeviceStatus.SerialNumber
+        if (-not $serialNumber -or -not ($serials -contains $serialNumber)) {
+            if ($deviceLines.Count -gt 1) {
+                Write-Host "`nAvailable devices:" -ForegroundColor Cyan
+                for ($i = 0; $i -lt $deviceLines.Count; $i++) {
+                    Write-Host "  $($i + 1). $($deviceLines[$i])"
+                }
+                $selection = Read-Host "➡️  Enter the number of the device to use"
+                $choice = 0
+                if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
+                    $choice = 1
+                }
+                $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
+            } else {
+                $serialNumber = $serials[0]
             }
-            $selection = Read-Host "➡️  Enter the number of the device to use"
-            $choice = 0
-            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
-                $choice = 1
-            }
-            $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
         }
 
         $State.DeviceStatus.IsConnected = $true
@@ -439,15 +540,71 @@ function Test-AndroidPath {
             Write-ErrorMessage -Operation "Path contains single quote"
             return $false
         }
-
-        $code = [int][char]$ch
-        if ($code -lt 32 -or $code -eq 127) {
-            $hex = "0x{0:X2}" -f $code
-            Write-ErrorMessage -Operation "Path contains control character" -Item $hex
+        elseif ($ch -eq '`') {
+            Write-ErrorMessage -Operation "Path contains backtick" -Item "``"
             return $false
+        }
+        elseif ($ch -eq '$') {
+            Write-ErrorMessage -Operation "Path contains dollar sign"
+            return $false
+        }
+        else {
+            $code = [int][char]$ch
+            if ($code -lt 32 -or $code -eq 127) {
+                $hex = "0x{0:X2}" -f $code
+                Write-ErrorMessage -Operation "Path contains control character" -Item $hex
+                return $false
+            }
         }
     }
     return $true
+}
+
+function Test-IsSafePath {
+    param(
+        [hashtable]$State,
+        [string]$Path,
+        [switch]$Force
+    )
+    if ($Path -like "$($State.Config.SafeRoot)*") { return $true }
+    if ($Force -or $State.Config.AllowUnsafeOps) { return $true }
+    Write-ErrorMessage -Operation "Operation blocked" -Item $Path -Details "outside safe root"
+    return $false
+}
+
+function Test-AndroidItemIsDirectory {
+    param(
+        [hashtable]$State,
+        [string]$Path
+    )
+    if (-not (Test-AndroidPath $Path)) {
+        return [PSCustomObject]@{ State = $State; IsDirectory = $false; Success = $false }
+    }
+
+    if ($null -eq $State.Features.SupportsStatC) {
+        $probe = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F','/')
+        $State = $probe.State
+        $State.Features.SupportsStatC = $probe.Success
+        if (-not $probe.Success -and -not $State.Features.WarnedStatFallback) {
+            Write-Log "Device does not support 'stat -c'; falling back to parsing 'ls -ld' output." "WARN"
+            $State.Features.WarnedStatFallback = $true
+        }
+    }
+
+    if ($State.Features.SupportsStatC) {
+        $res = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F', "'$Path'")
+        $State = $res.State
+        if ($res.Success) {
+            return [PSCustomObject]@{ State = $State; IsDirectory = ($res.Output.Trim() -eq 'directory'); Success = $true }
+        }
+    } else {
+        $res = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$Path'")
+        $State = $res.State
+        if ($res.Success -and $res.Output) {
+            return [PSCustomObject]@{ State = $State; IsDirectory = $res.Output.StartsWith('d'); Success = $true }
+        }
+    }
+    return [PSCustomObject]@{ State = $State; IsDirectory = $false; Success = $false }
 }
 
 # Validates numeric selection strings (e.g., "1,3,5" or "1-3") or 'all'
@@ -457,7 +614,7 @@ function Test-ValidSelection {
         [int]$Max
     )
 
-    if ([string]::IsNullOrWhiteSpace($Selection)) { return @() }
+    if ([string]::IsNullOrWhiteSpace($Selection)) { return $null }
     $sel = $Selection.Trim().ToLower()
     if ($sel -eq 'all') { return 0..($Max - 1) }
 
@@ -477,6 +634,7 @@ function Test-ValidSelection {
             return $null
         }
     }
+    if ($indices.Count -eq 0) { return $null }
     return ($indices | Sort-Object -Unique)
 }
 
@@ -490,16 +648,26 @@ function Show-UIHeader {
     )
     Clear-Host
     $width = 62
-    Write-Host ("╔" + ("═" * ($width - 2)) + "╗") -ForegroundColor Cyan
-    Write-Host ("║" + (" " * ($width - 2)) + "║") -ForegroundColor Cyan
-    $titlePadding = [math]::Floor(($width - 2 - $Title.Length) / 2)
-    Write-Host ("║" + (" " * $titlePadding) + $Title + (" " * ($width - 2 - $Title.Length - $titlePadding)) + "║") -ForegroundColor White
+    $innerWidth = $width - 2
+    $border = "═" * $innerWidth
+    $blank = " " * $innerWidth
+    Write-Host "╔$border╗" -ForegroundColor Cyan
+    Write-Host "║$blank║" -ForegroundColor Cyan
+
+    $titlePadding = [math]::Max(0, [math]::Floor(($innerWidth - $Title.Length) / 2))
+    $titleLine = "║" + (" " * $titlePadding) + $Title
+    $titleLine += " " * [math]::Max(0, $innerWidth - $Title.Length - $titlePadding) + "║"
+    Write-Host $titleLine -ForegroundColor White
+
     if ($SubTitle) {
-        $subtitlePadding = [math]::Floor(($width - 2 - $SubTitle.Length) / 2)
-        Write-Host ("║" + (" " * $subtitlePadding) + $SubTitle + (" " * ($width - 2 - $SubTitle.Length - $subtitlePadding)) + "║") -ForegroundColor Gray
+        $subtitlePadding = [math]::Max(0, [math]::Floor(($innerWidth - $SubTitle.Length) / 2))
+        $subLine = "║" + (" " * $subtitlePadding) + $SubTitle
+        $subLine += " " * [math]::Max(0, $innerWidth - $SubTitle.Length - $subtitlePadding) + "║"
+        Write-Host $subLine -ForegroundColor Gray
     }
-    Write-Host ("║" + (" " * ($width - 2)) + "║") -ForegroundColor Cyan
-    Write-Host ("╚" + ("═" * ($width - 2)) + "╝") -ForegroundColor Cyan
+
+    Write-Host "║$blank║" -ForegroundColor Cyan
+    Write-Host "╚$border╝" -ForegroundColor Cyan
 
     $State = Update-DeviceStatus -State $State
     $statusText = "🔌 Status: "
@@ -571,6 +739,32 @@ function Show-InlineProgress {
     $progressLine = "`r{0} [{1}] {2,3}% | {3,22} | {4,12} | ETR: {5}" -f $activityString, $progressBar, $displayPercent, $sizeText, $speedText, $etrText
     if ($ShowCancelMessage) { $progressLine += " | Press Esc or Q to cancel" }
     Write-Host $progressLine -NoNewline
+}
+
+# Clears the current console line to prevent leftover progress text.
+function Clear-ProgressLine {
+    Write-Host "`r" + (' ' * 80) + "`r" -NoNewline
+}
+
+# Parses the last line of an adb stderr log to extract percent or speed info.
+function Get-AdbStderrProgress {
+    param([string]$StderrPath)
+    try {
+        if (Test-Path -LiteralPath $StderrPath) {
+            $line = Get-Content -LiteralPath $StderrPath -ErrorAction SilentlyContinue -Tail 1
+            if ($line) {
+                $line = $line.Trim()
+                if ($line -match '(?<pct>\d+)%.*?(?<speed>\d+(?:\.\d+)?\s*(?:[KMG]?B/s))') {
+                    return "$($Matches.pct)% $($Matches.speed)".Trim()
+                } elseif ($line -match '(?<pct>\d+)%') {
+                    return "$($Matches.pct)%"
+                } elseif ($line -match '(?<speed>\d+(?:\.\d+)?\s*(?:[KMG]?B/s))') {
+                    return $Matches.speed
+                }
+            }
+        }
+    } catch { }
+    return $null
 }
 
 
@@ -668,7 +862,11 @@ function Get-LocalItemSize {
         if ($item.PSIsContainer) {
             $sb = {
                 param($path)
-                (Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                $sum = 0L
+                foreach ($f in [System.IO.Directory]::EnumerateFiles($path, '*', [System.IO.SearchOption]::AllDirectories)) {
+                    try { $sum += ([System.IO.FileInfo]::new($f)).Length } catch { }
+                }
+                return $sum
             }
             $job = Start-PortableJob -ScriptBlock $sb -ArgumentList $ItemPath
             if ($ShowStatus) {
@@ -717,6 +915,10 @@ function Get-AndroidDirectoryContents {
         # Canonicalize the path to resolve symbolic links before listing contents.
         $canonicalResult = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$cacheKey'")
         $State = $canonicalResult.State
+        if (-not ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output))) {
+            $canonicalResult = Invoke-AdbCommand -State $State -Arguments @('shell','realpath', "'$cacheKey'")
+            $State = $canonicalResult.State
+        }
         $listPath = if ($canonicalResult.Success -and -not [string]::IsNullOrWhiteSpace($canonicalResult.Output)) {
             $canonicalResult.Output.Trim()
         } else {
@@ -744,7 +946,14 @@ function Get-AndroidDirectoryContents {
     Write-Log "CACHE MISS: Fetching contents for '$canonicalKey' from device (requested as '$cacheKey')." "DEBUG" -SanitizePaths
 
     # Use the canonical path for the 'ls' command to get just names; details come from stat.
-    $result = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-1A', "'$listPath'")
+    $lsArgs = @('shell','ls')
+    if ($State.Config.VerboseLists) {
+        $lsArgs += '-lA'
+    } else {
+        $lsArgs += '-1A'
+    }
+    $lsArgs += "'$listPath'"
+    $result = Invoke-AdbCommand -State $State -Arguments $lsArgs
     $State = $result.State
 
     if (-not $result.Success) {
@@ -766,101 +975,120 @@ function Get-AndroidDirectoryContents {
         }
     }
 
+    $entries = @()
     foreach ($name in $names) {
-        # Always join with the original path for user context, not the canonical one
         $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
         if (-not (Test-AndroidPath $fullPath)) {
             Write-Log "Skipping item with unsafe path: $fullPath" "WARN" -SanitizePaths
             continue
         }
-
         $statPath = if ($listPath.EndsWith('/')) { "$listPath$name" } else { "$listPath/$name" }
-        if ($State.Features.SupportsStatC) {
-            $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n', "'$statPath'")
-            $State = $statResult.State
+        $entries += [PSCustomObject]@{ Name = $name.Trim(); FullPath = $fullPath; StatPath = $statPath }
+    }
 
-            if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
-                $typeStr = $Matches.type
-                $type = switch -regex ($typeStr) {
-                    '^directory$'       { 'Directory' }
-                    '^regular file$'    { 'File' }
-                    '^symbolic link.*$' {
-                        $linkType = 'Link'
-                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f',"'$statPath'")
-                        $State = $target.State
-                        if ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output)) {
-                            $targetInfo = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F',"'$($target.Output.Trim())'")
-                            $State = $targetInfo.State
-                            if ($targetInfo.Success -and $targetInfo.Output.Trim() -eq 'directory') {
-                                $linkType = 'Directory'
+    if ($entries.Count -eq 0) {
+        return [PSCustomObject]@{ State = $State; Items = @() }
+    }
+
+    $pathMap = @{}
+    $quotedPaths = @()
+    foreach ($e in $entries) {
+        $pathMap[$e.StatPath] = $e
+        $quoted = $e.StatPath.Replace("'", "'\''")
+        $quotedPaths += "'$quoted'"
+    }
+
+    if ($State.Features.SupportsStatC) {
+        $cmd = "for p in $($quotedPaths -join ' '); do stat -c '%F|%s|%n' `"`$p`"; done"
+        $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','sh','-c', $cmd)
+        $State = $statResult.State
+        if ($statResult.Success) {
+            $lines = $statResult.Output -split '\r?\n' | Where-Object { $_ }
+            foreach ($line in $lines) {
+                if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
+                    $path = $Matches.path.Trim()
+                    if ($pathMap.ContainsKey($path)) {
+                        $entry = $pathMap[$path]
+                        $typeStr = $Matches.type
+                        $type = switch -regex ($typeStr) {
+                            '^directory$'       { 'Directory' }
+                            '^regular file$'    { 'File' }
+                            '^symbolic link.*$' {
+                                $linkType = 'Link'
+                                $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$path'")
+                                $State = $target.State
+                                if (-not ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output))) {
+                                    $target = Invoke-AdbCommand -State $State -Arguments @('shell','realpath', "'$path'")
+                                    $State = $target.State
+                                }
+                                if ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output)) {
+                                    $targetInfo = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F', "'$($target.Output.Trim())'")
+                                    $State = $targetInfo.State
+                                    if ($targetInfo.Success -and $targetInfo.Output.Trim() -eq 'directory') { $linkType = 'Directory' }
+                                }
+                                $linkType
                             }
+                            default { 'Other' }
                         }
-                        $linkType
+                        $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+                        $items += [PSCustomObject]@{
+                            Name        = $entry.Name
+                            Type        = $type
+                            Permissions = ''
+                            FullPath    = $entry.FullPath
+                            Size        = $size
+                        }
                     }
-                    default { 'Other' }
-                }
-
-                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
-
-                $items += [PSCustomObject]@{
-                    Name        = $name.Trim()
-                    Type        = $type
-                    Permissions = ''
-                    FullPath    = $fullPath
-                    Size        = $size
-                }
-            }
-            else {
-                $items += [PSCustomObject]@{
-                    Name        = $name.Trim()
-                    Type        = 'Other'
-                    Permissions = ''
-                    FullPath    = $fullPath
-                    Size        = 0L
                 }
             }
         }
-        else {
-            $lsResult = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$statPath'")
-            $State = $lsResult.State
-
-            $type = 'Other'
-            $size = 0L
-            if ($lsResult.Success -and -not [string]::IsNullOrWhiteSpace($lsResult.Output)) {
-                $typeChar = $lsResult.Output[0]
-                switch ($typeChar) {
-                    'd' {
-                        $type = 'Directory'
-                    }
-                    'l' {
-                        $linkType = 'Link'
-                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
-                        $State = $target.State
-                        if ($target.Success -and $target.Output) {
-                            $targetLs = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$($target.Output.Trim())'")
-                            $State = $targetLs.State
-                            if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
-                        }
-                        $type = $linkType
-                    }
-                    '-' {
-                        $type = 'File'
-                        if ($lsResult.Output -match '^.{10}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)') {
-                            $size = [long]$Matches.size
-                        }
-                    }
-                    default {
+    }
+    else {
+        $cmd = "for p in $($quotedPaths -join ' '); do ls -ld `"`$p`"; done"
+        $lsResult = Invoke-AdbCommand -State $State -Arguments @('shell','sh','-c', $cmd)
+        $State = $lsResult.State
+        if ($lsResult.Success) {
+            $lines = $lsResult.Output -split '\r?\n' | Where-Object { $_ }
+            foreach ($line in $lines) {
+                if ($line -match '^.{10}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+.+?\s+(?<path>.+)$') {
+                    $path = $Matches.path.Trim()
+                    if ($pathMap.ContainsKey($path)) {
+                        $entry = $pathMap[$path]
+                        $typeChar = $line[0]
                         $type = 'Other'
+                        $size = 0L
+                        switch ($typeChar) {
+                            'd' { $type = 'Directory' }
+                            'l' {
+                                $linkType = 'Link'
+                                $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$path'")
+                                $State = $target.State
+                                if (-not ($target.Success -and $target.Output)) {
+                                    $target = Invoke-AdbCommand -State $State -Arguments @('shell','realpath', "'$path'")
+                                    $State = $target.State
+                                }
+                                if ($target.Success -and $target.Output) {
+                                    $targetLs = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$($target.Output.Trim())'")
+                                    $State = $targetLs.State
+                                    if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
+                                }
+                                $type = $linkType
+                            }
+                            '-' {
+                                $type = 'File'
+                                $size = [long]$Matches.size
+                            }
+                            default { $type = 'Other' }
+                        }
+                        $items += [PSCustomObject]@{
+                            Name        = $entry.Name
+                            Type        = $type
+                            Permissions = ''
+                            FullPath    = $entry.FullPath
+                            Size        = $size
+                        }
                     }
                 }
-            }
-
-            $items += [PSCustomObject]@{
-                Name        = $name.Trim()
-                Type        = $type
-                Permissions = ''
-                FullPath    = $fullPath
-                Size        = $size
             }
         }
     }
@@ -879,9 +1107,9 @@ function Select-PullItems {
     if ([string]::IsNullOrWhiteSpace($sourcePath)) { Write-Host "🟡 Action cancelled."; return $null }
     if (-not (Test-AndroidPath $sourcePath)) { Write-ErrorMessage -Operation "Invalid path"; return $null }
 
-    $sourceIsDirResult = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$sourcePath'")
-    $State = $sourceIsDirResult.State
-    $isDir = $sourceIsDirResult.Success -and $sourceIsDirResult.Output.StartsWith('d')
+    $dirCheck = Test-AndroidItemIsDirectory -State $State -Path $sourcePath
+    $State  = $dirCheck.State
+    $isDir  = $dirCheck.Success -and $dirCheck.IsDirectory
 
     $itemsToPull = @()
     if ($isDir) {
@@ -897,7 +1125,7 @@ function Select-PullItems {
         }
         $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1-3,5 or 'all')"
         $selectedIndices = Test-ValidSelection -Selection $selectionStr -Max $allItems.Count
-        if ($null -eq $selectedIndices) { Write-ErrorMessage -Operation "Invalid selection"; return $null }
+        if (-not $selectedIndices) { Write-Host "🟡 No items selected." -ForegroundColor Yellow; return $null }
         $itemsToPull = $selectedIndices | ForEach-Object { $allItems[$_] }
     } else {
         $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%s', "'$sourcePath'")
@@ -970,8 +1198,6 @@ function Execute-PullTransfer {
         [int]$UpdateInterval
     )
     $successCount = 0; $failureCount = 0; [long]$cumulativeBytesTransferred = 0
-    [int]$processedItemCount = 0
-    $gcTriggerThreshold = 10
     $overallStartTime = Get-Date
 
     foreach ($item in $Items) {
@@ -983,10 +1209,15 @@ function Execute-PullTransfer {
         $destPathOnPC = Join-Path $Destination $item.Name
         $itemTotalSize = $ItemSizes[$item.FullPath]
 
-        $adbCommand = { param($adbPath, $source, $dest, $serial) & $adbPath -s $serial pull $source $dest 2>&1 | Out-String }
-        $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @(
-            $script:AdbPath, $sourceItem, $destPathOnPC, $State.DeviceStatus.SerialNumber
-        )
+        if ($State.Config.WhatIf) {
+            Write-Host "[WhatIf] Would pull $sourceItem to $destPathOnPC" -ForegroundColor Yellow
+            $successCount++
+            continue
+        }
+
+        $stdoutFile = [System.IO.Path]::GetTempFileName()
+        $stderrFile = [System.IO.Path]::GetTempFileName()
+        $proc = Start-AdbProcess -State $State -Arguments @('pull', $sourceItem, $destPathOnPC) -StdOutPath $stdoutFile -StdErrPath $stderrFile
 
         Write-Host "Press Esc or Q to cancel..." -ForegroundColor Yellow
 
@@ -995,95 +1226,153 @@ function Execute-PullTransfer {
 
         $lastReportedSize = 0L
         $lastWriteTime   = [DateTime]::MinValue
-
-        $jobStart = Get-Date
-        $startTimeout = [TimeSpan]::FromSeconds(5)
         $cancelled = $false
-        if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
-            while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true).Key
-                    if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
-                        Stop-Job $job -ErrorAction SilentlyContinue
-                        try { Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
-                        Write-Host "`r" + (' ' * 80) -NoNewline
-                        Write-Host "`r⛔ Cancelled pulling $($item.Name)" -ForegroundColor Yellow
-                        $failureCount++
-                        $cancelled = $true
-                        break
+        if ($itemTotalSize -gt 0) {
+            while (-not $proc.HasExited) {
+                try {
+                    if ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true).Key
+                        if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
+                            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                            $cancelled = $true
+                            break
+                        }
                     }
+                } catch {
+                    # Input may be redirected; ignore key checks
                 }
-                if ($job.State -eq 'NotStarted') {
-                    if ((Get-Date) - $jobStart -gt $startTimeout) { break }
-                } else {
-                    $currentSize = $lastReportedSize
-                    if (Test-Path -LiteralPath $destPathOnPC) {
-                        try {
-                            $itemInfo = Get-Item -LiteralPath $destPathOnPC -ErrorAction Stop
-                            if ($itemInfo.PSIsContainer) {
-                                if ($itemInfo.LastWriteTime -gt $lastWriteTime) {
-                                    $currentSize     = Get-LocalItemSize -ItemPath $destPathOnPC
-                                    $lastReportedSize = $currentSize
-                                    $lastWriteTime    = $itemInfo.LastWriteTime
-                                }
-                            } else {
-                                if ($itemInfo.Length -gt $lastReportedSize) {
-                                    $currentSize      = Get-LocalItemSize -ItemPath $destPathOnPC
-                                    $lastReportedSize = $currentSize
-                                }
+                $currentSize = $lastReportedSize
+                if (Test-Path -LiteralPath $destPathOnPC) {
+                    try {
+                        $itemInfo = Get-Item -LiteralPath $destPathOnPC -ErrorAction Stop
+                        if ($itemInfo.PSIsContainer) {
+                            if ($itemInfo.LastWriteTime -gt $lastWriteTime) {
+                                $currentSize      = Get-LocalItemSize -ItemPath $destPathOnPC
+                                $lastReportedSize = $currentSize
+                                $lastWriteTime    = $itemInfo.LastWriteTime
                             }
-                        } catch { }
-                    }
-                    Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
+                        } else {
+                            if ($itemInfo.Length -gt $lastReportedSize) {
+                                $currentSize      = Get-LocalItemSize -ItemPath $destPathOnPC
+                                $lastReportedSize = $currentSize
+                            }
+                        }
+                    } catch { }
                 }
+                Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
                 Start-Sleep -Milliseconds $UpdateInterval
             }
+            if ($cancelled) {
+                $proc.WaitForExit() | Out-Null
+                Clear-ProgressLine
+                Write-Host "⛔ Cancelled pulling $($item.Name)" -ForegroundColor Yellow
+                $failureCount++
+                Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
+                continue
+            }
+            $proc.WaitForExit()
+            $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
+            if ($finalSize -lt $lastReportedSize) { $finalSize = $lastReportedSize }
+            Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
+            Clear-ProgressLine
+        } else {
+            $spinner = @('|','/','-','\\')
+            $spinIndex = 0
+            while (-not $proc.HasExited) {
+                try {
+                    if ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true).Key
+                        if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
+                            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                            $cancelled = $true
+                            break
+                        }
+                    }
+                } catch {
+                    # Input may be redirected; ignore key checks
+                }
+                $statusText = Get-AdbStderrProgress -StderrPath $stderrFile
+                if ($statusText) {
+                    Write-Host -NoNewline ("`r{0} Pulling {1}... {2} (Press Esc or Q to cancel)" -f $spinner[$spinIndex % $spinner.Length], $item.Name, $statusText)
+                } else {
+                    Write-Host -NoNewline ("`r{0} Pulling {1}... (Press Esc or Q to cancel)" -f $spinner[$spinIndex % $spinner.Length], $item.Name)
+                }
+                $spinIndex++
+                Start-Sleep -Milliseconds $UpdateInterval
+            }
+            if ($cancelled) {
+                $proc.WaitForExit() | Out-Null
+                Clear-ProgressLine
+                Write-Host "⛔ Cancelled pulling $($item.Name)" -ForegroundColor Yellow
+                $failureCount++
+                Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
+                Write-Host ""
+                continue
+            }
+            $proc.WaitForExit()
+            Clear-ProgressLine
+            Write-Host "Pulling $($item.Name)... done"
+            $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
         }
 
-        if ($cancelled) {
-            Remove-Job $job -Force -ErrorAction SilentlyContinue
-            $processedItemCount++
-            if (($processedItemCount % $gcTriggerThreshold) -eq 0) { [System.GC]::Collect() }
-            continue
-        }
-
-        $finalSize = Get-LocalItemSize -ItemPath $destPathOnPC
-        if ($finalSize -lt $lastReportedSize) { $finalSize = $lastReportedSize }
-        Show-InlineProgress -Activity "Pulling $($item.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
-        Write-Host ""
-
-        $resultOutput = Receive-Job $job
-        $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'No such file or directory|error:')
-        Remove-Job $job
+        $proc.WaitForExit()
+        $stdout = Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
+        $resultOutput = ($stdout,$stderr | Where-Object { $_ }) -join "`n"
+        $success = ($proc.ExitCode -eq 0 -and $resultOutput -notmatch 'No such file or directory|error:')
 
         if ($success) {
             $successCount++
             $cumulativeBytesTransferred += $finalSize
             Write-Host "✅ Pulled $($item.Name)" -ForegroundColor Green
-            Write-Host ($resultOutput | Out-String).Trim() -ForegroundColor Gray
+            Write-Host $resultOutput.Trim() -ForegroundColor Gray
 
             if ($Move) {
-                Write-Host "   - Removing source item..." -NoNewline
-                $deleteResult = Invoke-AdbCommand -State $State -Arguments @('shell','rm','-rf', "'$($item.FullPath)'")
-                $State = $deleteResult.State
-                if ($deleteResult.Success) {
-                    Write-Host " ✅" -ForegroundColor Green
-                    $State = Invalidate-ParentCache -State $State -ItemPath $item.FullPath
+                $canDelete = $false
+                if ($item.Type -eq 'Directory') {
+                    if ($State.Features.SupportsDuSb) {
+                        $remoteSizeRes = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$sourceItem'")
+                        $State = $remoteSizeRes.State
+                        if ($remoteSizeRes.Success -and $remoteSizeRes.Output -match '^(\d+)') {
+                            if ([long]$Matches[1] -eq $finalSize) { $canDelete = $true }
+                        }
+                    } else {
+                        $remoteCountRes = Invoke-AdbCommand -State $State -Arguments @('shell','sh','-c', "find '$sourceItem' -maxdepth 1 -mindepth 1 | wc -l")
+                        $State = $remoteCountRes.State
+                        if ($remoteCountRes.Success -and $remoteCountRes.Output -match '^(\d+)') {
+                            $remoteCount = [int]$Matches[1]
+                            $localCount = (Get-ChildItem -LiteralPath $destPathOnPC -Force | Measure-Object).Count
+                            if ($remoteCount -eq $localCount) { $canDelete = $true }
+                        }
+                    }
                 } else {
-                    Write-Host " " -NoNewline
-                    Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
+                    $remoteSizeRes = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%s', "'$sourceItem'")
+                    $State = $remoteSizeRes.State
+                    if ($remoteSizeRes.Success -and $remoteSizeRes.Output -match '^\d+$') {
+                        if ([long]$remoteSizeRes.Output -eq $finalSize) { $canDelete = $true }
+                    }
+                }
+                if ($canDelete -and (Test-IsSafePath -State $State -Path $sourceItem)) {
+                    Write-Host "   - Removing source item..." -NoNewline
+                    $deleteResult = Invoke-AdbCommand -State $State -Arguments @('shell','rm','-rf', "'$sourceItem'")
+                    $State = $deleteResult.State
+                    if ($deleteResult.Success) {
+                        Write-Host " ✅" -ForegroundColor Green
+                        $State = Invalidate-ParentCache -State $State -ItemPath $sourceItem
+                    } else {
+                        Write-Host " " -NoNewline
+                        Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
+                    }
+                } else {
+                    Write-Host "   - Skipping source delete; verification failed." -ForegroundColor Yellow
                 }
             }
         } else {
             $failureCount++
-            Write-Host ""
             Write-ErrorMessage -Operation "FAILED to pull" -Item $item.Name -Details $resultOutput
         }
 
-        $processedItemCount++
-        if (($processedItemCount % $gcTriggerThreshold) -eq 0) {
-            [System.GC]::Collect()
-        }
     }
     $overallTimeTaken = ((Get-Date) - $overallStartTime).TotalSeconds
     return [PSCustomObject]@{
@@ -1181,7 +1470,7 @@ function Confirm-PushTransfer {
     Write-Host "You are about to $ActionVerb $($Items.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
     Write-Host "From (PC)    : $(Split-Path $Items[0] -Parent)" -ForegroundColor Yellow
     Write-Host "To   (Android): $Destination" -ForegroundColor Yellow
-    Write-Host "NOTE: Progress is shown only when 'du -sb' is supported on the device." -ForegroundColor DarkGray
+    Write-Host "NOTE: Progress may be approximate if the device lacks 'du -sb'." -ForegroundColor DarkGray
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host " Action cancelled." -ForegroundColor Yellow; return $null }
     if     ($totalSize -ge 1GB)  { $updateInterval = 500 }
@@ -1204,8 +1493,6 @@ function Execute-PushTransfer {
         [int]$UpdateInterval
     )
     $successCount = 0; $failureCount = 0
-    [int]$processedItemCount = 0
-    $gcTriggerThreshold = 10
     foreach ($item in $Items) {
         if (-not (Test-AndroidPath $Destination)) {
             Write-ErrorMessage -Operation "Invalid path"
@@ -1216,11 +1503,15 @@ function Execute-PushTransfer {
         $sourceItem = $itemInfo.FullName
         $destPath = $Destination
 
-        $adbCommand = {
-            param($adbPath, $source, $dest, $serial)
-            & $adbPath -s $serial push $source $dest 2>&1 | Out-String
+        if ($State.Config.WhatIf) {
+            Write-Host "[WhatIf] Would push $sourceItem to $destPath" -ForegroundColor Yellow
+            $successCount++
+            continue
         }
-        $job = Start-PortableJob -ScriptBlock $adbCommand -ArgumentList @($script:AdbPath, $sourceItem, $destPath, $State.DeviceStatus.SerialNumber)
+
+        $stdoutFile = [System.IO.Path]::GetTempFileName()
+        $stderrFile = [System.IO.Path]::GetTempFileName()
+        $proc = Start-AdbProcess -State $State -Arguments @('push', $sourceItem, $destPath) -StdOutPath $stdoutFile -StdErrPath $stderrFile
 
         Write-Host "Press Esc or Q to cancel..." -ForegroundColor Yellow
 
@@ -1231,94 +1522,85 @@ function Execute-PushTransfer {
         $cancelled = $false
         if ($State.Features.SupportsDuSb) {
             $lastReportedSize = 0L
-            $jobStart = Get-Date
-            $startTimeout = [TimeSpan]::FromSeconds(5)
-            if ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
-                while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+            while (-not $proc.HasExited) {
+                try {
                     if ([Console]::KeyAvailable) {
                         $key = [Console]::ReadKey($true).Key
                         if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
-                            Stop-Job $job -ErrorAction SilentlyContinue
-                            try { Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
-                            Write-Host "`r" + (' ' * 80) -NoNewline
-                            Write-Host "`r⛔ Cancelled pushing $($itemInfo.Name)" -ForegroundColor Yellow
-                            $failureCount++
+                            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
                             $cancelled = $true
                             break
                         }
                     }
-                    if ($job.State -eq 'NotStarted') {
-                        if ((Get-Date) - $jobStart -gt $startTimeout) { break }
-                    } else {
-                        $currentSize = $lastReportedSize
-                        $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
-                        $State = $sizeResult.State
-                        if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
-                            $currentSize = [long]$Matches[1]
-                            $lastReportedSize = $currentSize
-                        }
-                        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
-                    }
-                    Start-Sleep -Milliseconds $UpdateInterval
+                } catch {
+                    # Ignore key checks when input is not interactive
                 }
+                $currentSize = $lastReportedSize
+                $sizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
+                $State = $sizeResult.State
+                if ($sizeResult.Success -and $sizeResult.Output -match '^(\d+)') {
+                    $currentSize = [long]$Matches[1]
+                    $lastReportedSize = $currentSize
+                }
+                Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
+                Start-Sleep -Milliseconds $UpdateInterval
             }
-
             if ($cancelled) {
-                Remove-Job $job -Force -ErrorAction SilentlyContinue
-                $processedItemCount++
-                if (($processedItemCount % $gcTriggerThreshold) -eq 0) { [System.GC]::Collect() }
+                $proc.WaitForExit() | Out-Null
+                Clear-ProgressLine
+                Write-Host "⛔ Cancelled pushing $($itemInfo.Name)" -ForegroundColor Yellow
+                $failureCount++
+                Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
                 continue
             }
-
             $finalSizeResult = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
             $State = $finalSizeResult.State
             $finalSize = if ($finalSizeResult.Success -and $finalSizeResult.Output -match '^(\d+)') { [long]$Matches[1] } else { $lastReportedSize }
             Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $finalSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
-            Write-Host ""
+            Clear-ProgressLine
         } else {
             $spinner = @('|','/','-','\\')
             $spinIndex = 0
-            $jobStart = Get-Date
-            $startTimeout = [TimeSpan]::FromSeconds(5)
-            while ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true).Key
-                    if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
-                        Stop-Job $job -ErrorAction SilentlyContinue
-                        try { Get-Process -Name adb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch { }
-                        Write-Host "`r" + (' ' * 80) -NoNewline
-                        Write-Host "`r⛔ Cancelled pushing $($itemInfo.Name)" -ForegroundColor Yellow
-                        $failureCount++
-                        $cancelled = $true
-                        break
+            while (-not $proc.HasExited) {
+                try {
+                    if ([Console]::KeyAvailable) {
+                        $key = [Console]::ReadKey($true).Key
+                        if ($key -eq [ConsoleKey]::Escape -or $key -eq [ConsoleKey]::Q) {
+                            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                            $cancelled = $true
+                            break
+                        }
                     }
+                } catch {
+                    # Ignore key checks when input is not interactive
                 }
-                if ($job.State -eq 'NotStarted') {
-                    if ((Get-Date) - $jobStart -gt $startTimeout) { break }
+                $statusText = Get-AdbStderrProgress -StderrPath $stderrFile
+                if ($statusText) {
+                    Write-Host -NoNewline ("`r{0} Pushing {1}... {2} (Press Esc or Q to cancel)" -f $spinner[$spinIndex % $spinner.Length], $itemInfo.Name, $statusText)
                 } else {
                     Write-Host -NoNewline ("`r{0} Pushing {1}... (Press Esc or Q to cancel)" -f $spinner[$spinIndex % $spinner.Length], $itemInfo.Name)
-                    $spinIndex++
                 }
+                $spinIndex++
                 Start-Sleep -Milliseconds $UpdateInterval
             }
             if ($cancelled) {
-                Remove-Job $job -Force -ErrorAction SilentlyContinue
+                $proc.WaitForExit() | Out-Null
+                Clear-ProgressLine
+                Write-Host "⛔ Cancelled pushing $($itemInfo.Name)" -ForegroundColor Yellow
+                $failureCount++
+                Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
                 Write-Host ""  # ensure newline if spinner was active
-                $processedItemCount++
-                if (($processedItemCount % $gcTriggerThreshold) -eq 0) { [System.GC]::Collect() }
                 continue
             }
-            Write-Host "`rPushing $($itemInfo.Name)... done"
-            Write-Host ""
+            Clear-ProgressLine
+            Write-Host "Pushing $($itemInfo.Name)... done"
         }
 
-        $jobErrors = @()
-        $resultOutput = Receive-Job $job -ErrorVariable jobErrors -ErrorAction SilentlyContinue
-        if ($jobErrors) { $resultOutput += $jobErrors | ForEach-Object { $_.ToString() } }
-
-        $combinedOutput = ($resultOutput | Out-String).Trim()
-        $success = ($job.JobStateInfo.State -eq 'Completed' -and $combinedOutput -notmatch 'error:')
-        Remove-Job $job
+        $stdout = Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue
+        $stderr = Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
+        $combinedOutput = ($stdout,$stderr | Where-Object { $_ }) -join "`n"
+        $success = ($proc.ExitCode -eq 0 -and $combinedOutput -notmatch 'error:')
 
         if ($success) {
             $successCount++
@@ -1328,25 +1610,49 @@ function Execute-PushTransfer {
             $State = Invalidate-DirectoryCache -State $State -DirectoryPath $Destination
 
             if ($Move) {
-                Write-Host "   - Removing source item..." -NoNewline
-                try {
-                    Remove-Item -LiteralPath $itemInfo.FullName -Force -Recurse -ErrorAction Stop
-                    Write-Host " ✅" -ForegroundColor Green
-                } catch {
-                    Write-Host " " -NoNewline
-                    Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
+                $canDelete = $false
+                if ($itemInfo.PSIsContainer) {
+                    if ($State.Features.SupportsDuSb) {
+                        $remoteSizeRes = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$destItemPath'")
+                        $State = $remoteSizeRes.State
+                        if ($remoteSizeRes.Success -and $remoteSizeRes.Output -match '^(\d+)') {
+                            $localSize = Get-LocalItemSize -ItemPath $itemInfo.FullName
+                            if ([long]$Matches[1] -eq $localSize) { $canDelete = $true }
+                        }
+                    } else {
+                        $remoteCountRes = Invoke-AdbCommand -State $State -Arguments @('shell','sh','-c', "find '$destItemPath' -maxdepth 1 -mindepth 1 | wc -l")
+                        $State = $remoteCountRes.State
+                        if ($remoteCountRes.Success -and $remoteCountRes.Output -match '^(\d+)') {
+                            $remoteCount = [int]$Matches[1]
+                            $localCount = (Get-ChildItem -LiteralPath $itemInfo.FullName -Force | Measure-Object).Count
+                            if ($remoteCount -eq $localCount) { $canDelete = $true }
+                        }
+                    }
+                } else {
+                    $remoteSizeRes = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%s', "'$destItemPath'")
+                    $State = $remoteSizeRes.State
+                    if ($remoteSizeRes.Success -and $remoteSizeRes.Output -match '^\d+$') {
+                        if ([long]$remoteSizeRes.Output -eq $itemInfo.Length) { $canDelete = $true }
+                    }
+                }
+                if ($canDelete) {
+                    Write-Host "   - Removing source item..." -NoNewline
+                    try {
+                        Remove-Item -LiteralPath $itemInfo.FullName -Force -Recurse -ErrorAction Stop
+                        Write-Host " ✅" -ForegroundColor Green
+                    } catch {
+                        Write-Host " " -NoNewline
+                        Write-ErrorMessage -Operation "(Failed to delete)" -NoNewline
+                    }
+                } else {
+                    Write-Host "   - Skipping source delete; verification failed." -ForegroundColor Yellow
                 }
             }
         } else {
             $failureCount++
-            Write-Host ""
             Write-ErrorMessage -Operation "FAILED to push" -Item $itemInfo.Name -Details $combinedOutput
         }
 
-        $processedItemCount++
-        if (($processedItemCount % $gcTriggerThreshold) -eq 0) {
-            [System.GC]::Collect()
-        }
     }
     return [PSCustomObject]@{
         State        = $State
@@ -1541,16 +1847,42 @@ function Show-ItemActionMenu {
 function Remove-AndroidItem {
     param(
         [hashtable]$State,
-        [string]$ItemPath
+        [string]$ItemPath,
+        [switch]$Force
     )
     if (-not (Test-AndroidPath $ItemPath)) {
         Write-ErrorMessage -Operation "Invalid path"
         return $State
     }
+    if (-not (Test-IsSafePath -State $State -Path $ItemPath -Force:$Force)) { return $State }
     $itemName = $ItemPath.Split('/')[-1]
-    $confirmation = Read-Host "❓ Are you sure you want to PERMANENTLY DELETE '$itemName'? [y/N]"
-    if ($confirmation.ToLower() -ne 'y') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return $State }
-    # Use single quotes for shell path
+    $typeCheck = Test-AndroidItemIsDirectory -State $State -Path $ItemPath
+    $State = $typeCheck.State
+    $isDir = $typeCheck.Success -and $typeCheck.IsDirectory
+
+    $requireName = $false
+    if ($isDir -and $State.Features.SupportsDuSb) {
+        $sizeRes = Invoke-AdbCommand -State $State -Arguments @('shell','du','-sb', "'$ItemPath'")
+        $State = $sizeRes.State
+        if ($sizeRes.Success -and $sizeRes.Output -match '^(\d+)') {
+            $dirSize = [long]$Matches[1]
+            if ($dirSize -ge ($State.Config.LargeDeleteConfirmThresholdMB * 1MB)) { $requireName = $true }
+        }
+    }
+
+    if ($State.Config.WhatIf) {
+        Write-Host "[WhatIf] Would delete '$itemName'" -ForegroundColor Yellow
+        return $State
+    }
+
+    if ($requireName) {
+        $typed = Read-Host "Type '$itemName' or DELETE to confirm"
+        if ($typed -ne $itemName -and $typed -ne 'DELETE') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return $State }
+    } else {
+        $confirmation = Read-Host "❓ Are you sure you want to PERMANENTLY DELETE '$itemName'? [y/N]"
+        if ($confirmation.ToLower() -ne 'y') { Write-Host "🟡 Deletion cancelled." -ForegroundColor Yellow; return $State }
+    }
+
     $result = Invoke-AdbCommand -State $State -Arguments @('shell','rm','-rf', "'$ItemPath'")
     $State = $result.State
     if ($result.Success) {
@@ -1564,10 +1896,16 @@ function Remove-AndroidItem {
 function Rename-AndroidItem {
     param(
         [hashtable]$State,
-        [string]$ItemPath
+        [string]$ItemPath,
+        [switch]$Force
     )
     if (-not (Test-AndroidPath $ItemPath)) {
         Write-ErrorMessage -Operation "Invalid path"
+        return $State
+    }
+    if (-not (Test-IsSafePath -State $State -Path $ItemPath -Force:$Force)) { return $State }
+    if ($State.Config.WhatIf) {
+        Write-Host "[WhatIf] Would rename '$ItemPath'" -ForegroundColor Yellow
         return $State
     }
     $itemName = $ItemPath.Split('/')[-1]
@@ -1581,13 +1919,12 @@ function Rename-AndroidItem {
         Write-ErrorMessage -Operation "Invalid path"
         return $State
     }
+    if (-not (Test-IsSafePath -State $State -Path $newItemPath -Force:$Force)) { return $State }
 
-    # Use single quotes for shell path
     $result = Invoke-AdbCommand -State $State -Arguments @('shell','mv', "'$ItemPath'", "'$newItemPath'")
     $State = $result.State
     if ($result.Success) {
         Write-Host "✅ Successfully renamed to '$newName'." -ForegroundColor Green
-        # Invalidate the old item's parent directory to refresh the browser view
         $State = Invalidate-ParentCache -State $State -ItemPath $ItemPath
     } else {
         Write-ErrorMessage -Operation "Failed to rename" -Item $itemName -Details $result.Output
@@ -1689,15 +2026,17 @@ function Show-MainMenu {
 
 # --- ADB Setup ---
 function Ensure-Adb {
-    if (Get-Command adb -ErrorAction SilentlyContinue) {
+    $existing = Get-Command adb -ErrorAction SilentlyContinue
+    if ($existing) {
+        $script:AdbPath = $existing.Source
         return $true
     }
 
     Write-Host "⚠️ ADB not found. Installing Android SDK Platform Tools..." -ForegroundColor Yellow
 
-    $platform = if ($IsWindows) { 'windows' } else { 'linux' }
+    $platform = if ($script:IsWindows) { 'windows' } else { 'linux' }
     $url = "https://dl.google.com/android/repository/platform-tools-latest-$platform.zip"
-    $installDir = if ($IsWindows) {
+    $installDir = if ($script:IsWindows) {
         Join-Path $env:USERPROFILE 'AppData\Local\Android\platform-tools'
     } else {
         Join-Path $HOME '.android/platform-tools'
@@ -1722,7 +2061,9 @@ function Ensure-Adb {
         }
 
         Write-Host "✅ ADB installed to $installDir" -ForegroundColor Green
-        Write-Host "Please reopen PowerShell or rerun this script." -ForegroundColor Yellow
+        $resolved = Get-Command adb -ErrorAction SilentlyContinue
+        if ($resolved) { $script:AdbPath = $resolved.Source }
+        return $true
     }
     catch {
         Write-ErrorMessage -Operation "Failed to install ADB" -Details $_
