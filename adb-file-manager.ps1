@@ -379,16 +379,15 @@ function Update-DeviceStatus {
     $State = $startResult.State
     $result = Invoke-AdbCommand -State $State -Arguments @('devices') -NoSerial
     $State = $result.State
-    [string[]]$deviceLines = $result.Output -split "`n" |
-        ForEach-Object { $_.Trim() } |
-        Where-Object { $_ -and $_ -notlike 'List of devices attached*' -and $_ -notlike '* daemon*' }
+    [string[]]$deviceLines = $result.Output -split '\r?\n' |
+        Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() }
 
     if ($deviceLines.Count -gt 0) {
         Write-Log "Detected devices: $($deviceLines -join ', ')" "DEBUG"
     }
 
     if ($deviceLines.Count -gt 0) {
-        $serials = $deviceLines | ForEach-Object { $_.Split()[0].Trim() }
+        $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
         $serialNumber = $State.DeviceStatus.SerialNumber
         if (-not $serialNumber -or -not ($serials -contains $serialNumber)) {
             if ($deviceLines.Count -gt 1) {
@@ -401,7 +400,7 @@ function Update-DeviceStatus {
                 if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
                     $choice = 1
                 }
-                $serialNumber = ($deviceLines[$choice - 1].Split())[0]
+                $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
             } else {
                 $serialNumber = $serials[0]
             }
@@ -948,12 +947,7 @@ function Get-AndroidDirectoryContents {
 
     # Use the canonical path for the 'ls' command to get just names; details come from stat.
     $lsArgs = @('shell','ls')
-    if ($State.Config.VerboseLists) {
-        $lsArgs += '-l'
-    } else {
-        $lsArgs += '-1'
-    }
-    $lsArgs += '-A'
+    $lsArgs += ($State.Config.VerboseLists ? '-lA' : '-1A')
     $lsArgs += "'$listPath'"
     $result = Invoke-AdbCommand -State $State -Arguments $lsArgs
     $State = $result.State
