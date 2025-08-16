@@ -1731,6 +1731,21 @@ function Get-ItemEmoji {
     }
 }
 
+function Sort-BrowseItems {
+    param([psobject[]]$Items)
+    $list = [System.Collections.Generic.List[psobject]]::new([psobject[]]$Items)
+    $comparison = [System.Comparison[psobject]]{
+        param($a, $b)
+        $aRank = if ($a.Type -eq 'Directory') { 0 } else { 1 }
+        $bRank = if ($b.Type -eq 'Directory') { 0 } else { 1 }
+        $rankCompare = $aRank.CompareTo($bRank)
+        if ($rankCompare -ne 0) { return $rankCompare }
+        return [StringComparer]::InvariantCultureIgnoreCase.Compare($a.Name, $b.Name)
+    }
+    $list.Sort($comparison)
+    return ,@($list)
+}
+
 function Browse-AndroidFileSystem {
     param([hashtable]$State)
     $State = Show-UIHeader -State $State -Title "FILE BROWSER"
@@ -1750,21 +1765,8 @@ function Browse-AndroidFileSystem {
         $res = Get-AndroidDirectoryContents -State $State -Path $currentPath
         $State = $res.State
 
-        # Sort directories before files and compare names using a culture-invariant,
-        # case-insensitive comparer so that ordering is deterministic regardless of
-        # the host system's culture settings.
-        $list = [System.Collections.Generic.List[psobject]]::new()
-        $list.AddRange(@($res.Items))
-        $comparison = [System.Comparison[psobject]]{
-            param($a, $b)
-            $aRank = if ($a.Type -eq 'Directory') { 0 } else { 1 }
-            $bRank = if ($b.Type -eq 'Directory') { 0 } else { 1 }
-            $rankCompare = $aRank.CompareTo($bRank)
-            if ($rankCompare -ne 0) { return $rankCompare }
-            return [StringComparer]::InvariantCultureIgnoreCase.Compare($a.Name, $b.Name)
-        }
-        $list.Sort($comparison)
-        $items = @($list)
+        # Sort directories before files using a culture-invariant, case-insensitive comparer
+        $items = Sort-BrowseItems $res.Items
 
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         for ($i = 0; $i -lt $items.Count; $i++) {
@@ -2138,5 +2140,7 @@ function Start-ADBTool {
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
 
-# Start the application
-Start-ADBTool
+# Start the application when not dot-sourced
+if ($MyInvocation.InvocationName -ne '.') {
+    Start-ADBTool
+}

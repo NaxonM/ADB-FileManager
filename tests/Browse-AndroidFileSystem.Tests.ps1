@@ -1,20 +1,5 @@
-Describe "Browse-AndroidFileSystem sorting" {
-    BeforeAll {
-        function Sort-BrowseItems {
-            param([array]$Items)
-            $list = [System.Collections.Generic.List[psobject]]::new([psobject[]]$Items)
-            $comparison = [System.Comparison[psobject]]{
-                param($a, $b)
-                $aRank = if ($a.Type -eq 'Directory') { 0 } else { 1 }
-                $bRank = if ($b.Type -eq 'Directory') { 0 } else { 1 }
-                $rankCompare = $aRank.CompareTo($bRank)
-                if ($rankCompare -ne 0) { return $rankCompare }
-                return [StringComparer]::InvariantCultureIgnoreCase.Compare($a.Name, $b.Name)
-            }
-            $list.Sort($comparison)
-            return $list
-        }
-    }
+Describe "Sort-BrowseItems" {
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager.ps1" }
 
     It "orders directories before other items and sorts names alphabetically" {
         $items = @(
