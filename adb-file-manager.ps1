@@ -558,6 +558,19 @@ function Add-ToCacheWithLimit {
     }
 }
 
+# Splits an array into chunks of a specified maximum size.
+function Split-IntoChunks {
+    param(
+        [object[]]$Items,
+        [int]$ChunkSize
+    )
+    if (-not $Items) { return @() }
+    for ($i = 0; $i -lt $Items.Count; $i += $ChunkSize) {
+        $end = [Math]::Min($i + $ChunkSize - 1, $Items.Count - 1)
+        ,(@($Items[$i..$end]))
+    }
+}
+
 # Validates Android paths to prevent command injection
 function Test-AndroidPath {
     param([string]$Path)
@@ -960,7 +973,8 @@ function Get-AndroidDirectoryContents {
     }
 
     $canonicalKey = ConvertTo-AndroidPath $listPath
-    $State.DirectoryCacheAliases[$cacheKey] = $canonicalKey
+    $State.DirectoryCacheAliases[$cacheKey]  = $canonicalKey
+    $State.DirectoryCacheAliases[$canonicalKey] = $canonicalKey
 
     # Check cache using the canonical key
     if ($State.DirectoryCache.Contains($canonicalKey)) {
@@ -1018,99 +1032,107 @@ function Get-AndroidDirectoryContents {
 
     $items = @()
     if ($pathMap.Count -gt 0) {
+        $chunkSize = 50
+        $keys = @($pathMap.Keys)
         if ($State.Features.SupportsStatC) {
-            $statArgs = @('shell','stat','-c','%F|%s|%n') + ($pathMap.Keys | ForEach-Object { "'$_'" })
-            $statResult = Invoke-AdbCommand -State $State -Arguments $statArgs
-            $State = $statResult.State
-            if ($statResult.Success) {
-                $lines = $statResult.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-                foreach ($line in $lines) {
-                    if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
-                        $path = $Matches.path.Trim()
-                        if ($pathMap.ContainsKey($path)) {
-                            $info = $pathMap[$path]
-                            $type = switch -regex ($Matches.type) {
-                                '^directory$'    { 'Directory' }
-                                '^regular file$' { 'File' }
-                                '^symbolic link.*$' { 'Link' }
-                                default { 'Other' }
+            foreach ($chunk in Split-IntoChunks -Items $keys -ChunkSize $chunkSize) {
+                $statArgs = @('shell','stat','-c','%F|%s|%n') + ($chunk | ForEach-Object { "'$_'" })
+                $statResult = Invoke-AdbCommand -State $State -Arguments $statArgs
+                $State = $statResult.State
+                if ($statResult.Success) {
+                    $lines = $statResult.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                    foreach ($line in $lines) {
+                        if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
+                            $path = $Matches.path.Trim()
+                            if ($pathMap.ContainsKey($path)) {
+                                $info = $pathMap[$path]
+                                $type = switch -regex ($Matches.type) {
+                                    '^directory$'    { 'Directory' }
+                                    '^regular file$' { 'File' }
+                                    '^symbolic link.*$' { 'Link' }
+                                    default { 'Other' }
+                                }
+                                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+                                $items += [PSCustomObject]@{
+                                    Name        = $info.Name
+                                    Type        = $type
+                                    Permissions = ''
+                                    FullPath    = $info.FullPath
+                                    Size        = $size
+                                }
+                                $State.DirectoryCacheAliases[$info.FullPath] = $path
+                                $State.DirectoryCacheAliases[$path] = $path
+                                $pathMap.Remove($path)
                             }
-                            $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
-                            $items += [PSCustomObject]@{
-                                Name        = $info.Name
-                                Type        = $type
-                                Permissions = ''
-                                FullPath    = $info.FullPath
-                                Size        = $size
-                            }
-                            $pathMap.Remove($path)
                         }
                     }
                 }
             }
         }
         else {
-            $lsArgs = @('shell','ls','-ld') + ($pathMap.Keys | ForEach-Object { "'$_'" })
-            $lsResult = Invoke-AdbCommand -State $State -Arguments $lsArgs
-            $State = $lsResult.State
-            if ($lsResult.Success) {
-                $lines = $lsResult.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-                foreach ($line in $lines) {
-                    if ($line -match '^(?<perm>.).{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+\S+\s+\S+\s+\S+\s+(?<rest>.+)$') {
-                        $path = ($Matches.rest -split '\s->\s')[0].Trim()
-                        if ($pathMap.ContainsKey($path)) {
-                            $info = $pathMap[$path]
-                            $type = switch ($Matches.perm) {
-                                'd' { 'Directory' }
-                                'l' { 'Link' }
-                                '-' { 'File' }
-                                default { 'Other' }
+            foreach ($chunk in Split-IntoChunks -Items $keys -ChunkSize $chunkSize) {
+                $lsArgs = @('shell','ls','-ld') + ($chunk | ForEach-Object { "'$_'" })
+                $lsResult = Invoke-AdbCommand -State $State -Arguments $lsArgs
+                $State = $lsResult.State
+                if ($lsResult.Success) {
+                    $lines = $lsResult.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                    foreach ($line in $lines) {
+                        if ($line -match '^(?<perm>.).{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+\S+\s+\S+\s+\S+\s+(?<rest>.+)$') {
+                            $path = ($Matches.rest -split '\s->\s')[0].Trim()
+                            if ($pathMap.ContainsKey($path)) {
+                                $info = $pathMap[$path]
+                                $type = switch ($Matches.perm) {
+                                    'd' { 'Directory' }
+                                    'l' { 'Link' }
+                                    '-' { 'File' }
+                                    default { 'Other' }
+                                }
+                                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+                                $items += [PSCustomObject]@{
+                                    Name        = $info.Name
+                                    Type        = $type
+                                    Permissions = ''
+                                    FullPath    = $info.FullPath
+                                    Size        = $size
+                                }
+                                $State.DirectoryCacheAliases[$info.FullPath] = $path
+                                $State.DirectoryCacheAliases[$path] = $path
+                                $pathMap.Remove($path)
                             }
-                            $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
-                            $items += [PSCustomObject]@{
-                                Name        = $info.Name
-                                Type        = $type
-                                Permissions = ''
-                                FullPath    = $info.FullPath
-                                Size        = $size
-                            }
-                            $pathMap.Remove($path)
                         }
                     }
                 }
             }
         }
 
-        foreach ($remaining in $pathMap.Values) {
+        foreach ($kvp in $pathMap.GetEnumerator()) {
+            $info = $kvp.Value
             $items += [PSCustomObject]@{
-                Name        = $remaining.Name
+                Name        = $info.Name
                 Type        = 'Other'
                 Permissions = ''
-                FullPath    = $remaining.FullPath
+                FullPath    = $info.FullPath
                 Size        = 0L
             }
+            $State.DirectoryCacheAliases[$info.FullPath] = $kvp.Key
+            $State.DirectoryCacheAliases[$kvp.Key] = $kvp.Key
         }
     }
 
     # Resolve any items not yet confirmed as directories using additional checks
-    $unverifiedItems = $items | Where-Object { $_.Type -notin 'Directory','Link' }
+    $unverifiedItems = $items | Where-Object { $_.Type -notin 'Directory','Link','File' }
     if ($unverifiedItems.Count -gt 0) {
-        $lsArgs  = @('shell','ls','-p','-d') + ($unverifiedItems | ForEach-Object { "'$($_.FullPath)'" })
-        $lsProbe = Invoke-AdbCommand -State $State -Arguments $lsArgs
-        $State   = $lsProbe.State
-        if ($lsProbe.Success) {
-            $lines = $lsProbe.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            for ($i = 0; $i -lt $unverifiedItems.Count -and $i -lt $lines.Count; $i++) {
-                $line = $lines[$i]
-                $item = $unverifiedItems[$i]
-                $item.Type = if ($line.EndsWith('/')) { 'Directory' } else { 'File' }
-            }
-        }
-        foreach ($item in ($unverifiedItems | Where-Object { $_.Type -notin 'Directory','File' })) {
-            $typeCheck = Test-AndroidItemIsDirectory -State $State -Path $item.FullPath
-            $State = $typeCheck.State
-            if ($typeCheck.Success) {
-                $item.Type = if ($typeCheck.IsDirectory) { 'Directory' } else { 'File' }
+        foreach ($chunk in Split-IntoChunks -Items $unverifiedItems -ChunkSize $chunkSize) {
+            $lsArgs  = @('shell','ls','-p','-d') + ($chunk | ForEach-Object { "'$($_.FullPath)'" })
+            $lsProbe = Invoke-AdbCommand -State $State -Arguments $lsArgs
+            $State   = $lsProbe.State
+            if ($lsProbe.Success) {
+                $lines = $lsProbe.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                for ($i = 0; $i -lt $chunk.Count -and $i -lt $lines.Count; $i++) {
+                    $line = $lines[$i]
+                    $item = $chunk[$i]
+                    $item.Type = if ($line.EndsWith('/')) { 'Directory' } else { 'File' }
+                }
             }
         }
     }
