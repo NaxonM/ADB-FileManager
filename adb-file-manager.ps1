@@ -977,6 +977,7 @@ function Get-AndroidDirectoryContents {
         }
     }
 
+    $pathMap = @{}
     foreach ($name in $names) {
         $nameTrim = $name.Trim()
         $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$nameTrim" } else { "$cacheKey/$nameTrim" }
@@ -984,70 +985,83 @@ function Get-AndroidDirectoryContents {
             Write-Log "Skipping item with unsafe path: $fullPath" "WARN" -SanitizePaths
             continue
         }
-
         $statPath = if ($listPath.EndsWith('/')) { "$listPath$nameTrim" } else { "$listPath/$nameTrim" }
-        $type = 'Other'
-        $size = 0L
+        $pathMap[$statPath] = @{ Name = $nameTrim; FullPath = $fullPath }
+    }
 
+    $items = @()
+    if ($pathMap.Count -gt 0) {
         if ($State.Features.SupportsStatC) {
-            $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n', "'$statPath'")
+            $statArgs = @('shell','stat','-c','%F|%s|%n') + ($pathMap.Keys | ForEach-Object { "'$_'" })
+            $statResult = Invoke-AdbCommand -State $State -Arguments $statArgs
             $State = $statResult.State
-            if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
-                $typeStr = $Matches.type
-                $type = switch -regex ($typeStr) {
-                    '^directory$'       { 'Directory' }
-                    '^regular file$'    { 'File' }
-                    '^symbolic link.*$' {
-                        $linkType = 'Link'
-                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
-                        $State = $target.State
-                        if ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output)) {
-                            $targetInfo = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F', "'$($target.Output.Trim())'")
-                            $State = $targetInfo.State
-                            if ($targetInfo.Success -and $targetInfo.Output.Trim() -eq 'directory') { $linkType = 'Directory' }
+            if ($statResult.Success) {
+                $lines = $statResult.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                foreach ($line in $lines) {
+                    if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
+                        $path = $Matches.path.Trim()
+                        if ($pathMap.ContainsKey($path)) {
+                            $info = $pathMap[$path]
+                            $type = switch -regex ($Matches.type) {
+                                '^directory$'    { 'Directory' }
+                                '^regular file$' { 'File' }
+                                '^symbolic link.*$' { 'Link' }
+                                default { 'Other' }
+                            }
+                            $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+                            $items += [PSCustomObject]@{
+                                Name        = $info.Name
+                                Type        = $type
+                                Permissions = ''
+                                FullPath    = $info.FullPath
+                                Size        = $size
+                            }
+                            $pathMap.Remove($path)
                         }
-                        $linkType
                     }
-                    default { 'Other' }
                 }
-                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
             }
         }
         else {
-            $lsResult = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$statPath'")
+            $lsArgs = @('shell','ls','-ld') + ($pathMap.Keys | ForEach-Object { "'$_'" })
+            $lsResult = Invoke-AdbCommand -State $State -Arguments $lsArgs
             $State = $lsResult.State
-            if ($lsResult.Success -and -not [string]::IsNullOrWhiteSpace($lsResult.Output)) {
-                $typeChar = $lsResult.Output[0]
-                switch ($typeChar) {
-                    'd' { $type = 'Directory' }
-                    'l' {
-                        $linkType = 'Link'
-                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
-                        $State = $target.State
-                        if ($target.Success -and $target.Output) {
-                            $targetLs = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$($target.Output.Trim())'")
-                            $State = $targetLs.State
-                            if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
+            if ($lsResult.Success) {
+                $lines = $lsResult.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                foreach ($line in $lines) {
+                    if ($line -match '^(?<perm>.).{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+\S+\s+\S+\s+\S+\s+(?<rest>.+)$') {
+                        $path = ($Matches.rest -split '\s->\s')[0].Trim()
+                        if ($pathMap.ContainsKey($path)) {
+                            $info = $pathMap[$path]
+                            $type = switch ($Matches.perm) {
+                                'd' { 'Directory' }
+                                'l' { 'Link' }
+                                '-' { 'File' }
+                                default { 'Other' }
+                            }
+                            $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+                            $items += [PSCustomObject]@{
+                                Name        = $info.Name
+                                Type        = $type
+                                Permissions = ''
+                                FullPath    = $info.FullPath
+                                Size        = $size
+                            }
+                            $pathMap.Remove($path)
                         }
-                        $type = $linkType
                     }
-                    '-' {
-                        $type = 'File'
-                        if ($lsResult.Output -match '^.{10}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)') {
-                            $size = [long]$Matches.size
-                        }
-                    }
-                    default { $type = 'Other' }
                 }
             }
         }
 
-        $items += [PSCustomObject]@{
-            Name        = $nameTrim
-            Type        = $type
-            Permissions = ''
-            FullPath    = $fullPath
-            Size        = $size
+        foreach ($remaining in $pathMap.Values) {
+            $items += [PSCustomObject]@{
+                Name        = $remaining.Name
+                Type        = 'Other'
+                Permissions = ''
+                FullPath    = $remaining.FullPath
+                Size        = 0L
+            }
         }
     }
 
