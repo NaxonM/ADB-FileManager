@@ -963,7 +963,7 @@ function Get-AndroidDirectoryContents {
     }
 
     $items = @()
-    $names = $result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    $names = $result.Output -split '\r?\n' | Where-Object { $_ }
 
     if ($null -eq $State.Features.SupportsStatC) {
         $probe = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n','/')
@@ -983,7 +983,7 @@ function Get-AndroidDirectoryContents {
             continue
         }
         $statPath = if ($listPath.EndsWith('/')) { "$listPath$name" } else { "$listPath/$name" }
-        $entries += [PSCustomObject]@{ Name = $name; FullPath = $fullPath; StatPath = $statPath }
+        $entries += [PSCustomObject]@{ Name = $name.Trim(); FullPath = $fullPath; StatPath = $statPath }
     }
 
     if ($entries.Count -eq 0) {
