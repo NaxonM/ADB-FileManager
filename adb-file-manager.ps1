@@ -1822,9 +1822,12 @@ function Get-AndroidDirectoryContentsJob {
             }
             Wait-Job $job | Out-Null
             $res = Receive-Job $job -ErrorAction SilentlyContinue
-            $jobErrors = $job.ChildJobs | ForEach-Object { $_.Error } | Where-Object { $_ }
+            $jobErrors = $job.ChildJobs | ForEach-Object { $_.Error | ForEach-Object { $_.ToString().Trim() } } | Where-Object { $_ }
+            $jobErrorText = ($jobErrors -join " `n").Trim()
+            if ($jobErrorText) { Write-Log "Background job error: $jobErrorText" "ERROR" }
             Remove-Job $job -Force | Out-Null
-            if (-not $res -or $jobErrors) { throw 'JobFailed' }
+            if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+            $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobErrorText
             return $res
         } else {
             $ps = [powershell]::Create()
@@ -1855,10 +1858,17 @@ function Get-AndroidDirectoryContentsJob {
             }
             $res = $ps.EndInvoke($handle)
             $ps.Dispose()
+            if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+            $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue ""
             return $res
         }
     } catch {
-        return & $Fetcher $State $Path
+        $err = $_.ToString()
+        Write-Log "Background job exception: $err" "ERROR"
+        $res = & $Fetcher $State $Path
+        if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+        $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $err
+        return $res
     }
 }
 
@@ -1881,8 +1891,10 @@ function Browse-AndroidFileSystem {
 
         Write-Host "`r" + (' ' * ($loadingMsg.Length + 2)) + "`r" -NoNewline
 
+        $jobErrors = $null
+        if ($res -and $res.PSObject.Properties.Match('JobErrors').Count -gt 0) { $jobErrors = $res.JobErrors }
         if (-not $res -or -not $res.Items) {
-            Write-ErrorMessage -Operation "Failed to load directory"
+            Write-ErrorMessage -Operation "Failed to load directory" -Details $jobErrors
             Start-Sleep -Seconds 1
             return $State
         }
