@@ -96,6 +96,7 @@ $script:State = @{
         SupportsDuSb       = $false
         Checked            = $false
         SupportsStatC      = $null
+        SupportsFind       = $null
         WarnedStatFallback = $false
     }
     Config = @{
@@ -1041,24 +1042,52 @@ function Get-AndroidDirectoryContents {
             $State.Features.WarnedStatFallback = $true
         }
     }
-
-    $cmdArgs = @('shell','find', "'$listPath'", '-maxdepth','1','-mindepth','1')
-    if ($State.Features.SupportsStatC) {
-        $cmdArgs += @('-exec','stat','-c','%F|%s|%n','{}','+')
-    } else {
-        $cmdArgs += @('-exec','ls','-ld','{}','+')
+    if ($null -eq $State.Features.SupportsFind) {
+        $probeFind = Invoke-AdbCommand -State $State -Arguments @('shell','find','/','-maxdepth','0')
+        $State = $probeFind.State
+        $State.Features.SupportsFind = $probeFind.Success
+        if (-not $probeFind.Success) {
+            Write-Log "Device does not support 'find'; falling back to slower 'ls/stat' loop." "WARN"
+        }
     }
-    $result = Invoke-AdbCommand -State $State -Arguments $cmdArgs
-    $State = $result.State
 
-    if (-not $result.Success) {
-        Write-Host ""
-        Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $result.Output
-        return [PSCustomObject]@{ State = $State; Items = @() }
+    $chunkSize = 50
+    $lines = @()
+    if ($State.Features.SupportsFind) {
+        $findCmd = "find '$listPath' -maxdepth 1 -mindepth 1"
+        if ($State.Features.SupportsStatC) {
+            $findCmd += " -exec stat -c '%F|%s|%n' {} +"
+        } else {
+            $findCmd += " -exec ls -ld {} +"
+        }
+        $cmdArgs = @('shell','sh','-c', "$findCmd 2>/dev/null || true")
+        $result = Invoke-AdbCommand -State $State -Arguments $cmdArgs
+        $State = $result.State
+        $lines = $result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+    } else {
+        $listRes = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-1', "'$listPath'")
+        $State = $listRes.State
+        if (-not $listRes.Success) {
+            Write-Host ""
+            Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $listRes.Output
+            return [PSCustomObject]@{ State = $State; Items = @() }
+        }
+        $entries = $listRes.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        foreach ($chunk in Split-IntoChunks -Items $entries -ChunkSize $chunkSize) {
+            if ($State.Features.SupportsStatC) {
+                $metaArgs = @('shell','stat','-c','%F|%s|%n') + ($chunk | ForEach-Object { "'$listPath/$_'" })
+            } else {
+                $metaArgs = @('shell','ls','-ld') + ($chunk | ForEach-Object { "'$listPath/$_'" })
+            }
+            $meta = Invoke-AdbCommand -State $State -Arguments $metaArgs
+            $State = $meta.State
+            if ($meta.Success) {
+                $lines += $meta.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            }
+        }
     }
 
     $items = @()
-    $lines = $result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
     foreach ($line in $lines) {
         if ($State.Features.SupportsStatC) {
             if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
@@ -1108,8 +1137,6 @@ function Get-AndroidDirectoryContents {
             }
         }
     }
-
-    $chunkSize = 50
 
     # Resolve any items not yet confirmed as directories using additional checks
     $unverifiedItems = $items | Where-Object { $_.Type -notin 'Directory','Link','File' }
