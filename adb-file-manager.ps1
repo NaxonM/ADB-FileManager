@@ -1780,6 +1780,7 @@ function Get-ItemEmoji {
 
 function Browse-AndroidFileSystem {
     param([hashtable]$State)
+    $State = Show-UIHeader -State $State -Title "FILE BROWSER"
     $currentPath = Read-Host "➡️  Enter starting path (default: /sdcard/)"
     if ([string]::IsNullOrWhiteSpace($currentPath)) { $currentPath = "/sdcard/" }
     if (-not (Test-AndroidPath $currentPath)) {
@@ -1815,7 +1816,7 @@ function Browse-AndroidFileSystem {
         $choice = Read-Host "`n➡️  Enter number to browse, or select an action"
 
         switch ($choice) {
-            "q" { return $State }
+            "q" { Clear-Host; return $State }
             "c" { $State = New-AndroidFolder -State $State -ParentPath $currentPath; Read-Host "`nPress Enter to continue..." }
             "p" { $State = Pull-FilesFromAndroid -State $State -Path $currentPath; Read-Host "`nPress Enter to continue..." }
             "u" { $State = Push-FilesToAndroid -State $State -DestinationPath $currentPath; Read-Host "`nPress Enter to continue..." }
@@ -1904,14 +1905,16 @@ function Show-ItemActionMenu {
             "3" {
                 $State = Rename-AndroidItem -State $State -ItemPath $Item.FullPath
                 Read-Host "`nPress Enter to continue..."
+                Clear-Host
                 return $State # Return to browser as item name has changed
             }
             "4" {
                 $State = Remove-AndroidItem -State $State -ItemPath $Item.FullPath
                 Read-Host "`nPress Enter to continue..."
+                Clear-Host
                 return $State # Return to browser as item is gone
             }
-            "5" { return $State }
+            "5" { Clear-Host; return $State }
             default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
     }
