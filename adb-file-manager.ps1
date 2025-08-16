@@ -371,11 +371,17 @@ function Update-DeviceStatus {
 
     # If a device is connected and we checked less than 15 seconds ago, skip the check.
     if ($State.DeviceStatus.IsConnected -and ((Get-Date) - $State.LastStatusUpdateTime).TotalSeconds -lt 15) {
+        $statusText = if ($State.DeviceStatus.IsConnected) {
+            "🔌 Status: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))"
+        } else {
+            "🔌 Status: Disconnected - Please connect a device."
+        }
         return [pscustomobject]@{
             State = $State
             Devices = @()
             ConnectionChanged = $false
             NeedsSelection = $false
+            StatusText = $statusText
         }
     }
 
@@ -455,12 +461,18 @@ function Update-DeviceStatus {
     # Update the timestamp after a full check.
     $State.LastStatusUpdateTime = (Get-Date)
     $connectionChanged = ($prevConnected -ne $State.DeviceStatus.IsConnected) -or ($prevSerial -ne $State.DeviceStatus.SerialNumber)
+    $statusText = if ($State.DeviceStatus.IsConnected) {
+        "🔌 Status: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))"
+    } else {
+        "🔌 Status: Disconnected - Please connect a device."
+    }
 
     return [pscustomobject]@{
         State = $State
         Devices = $deviceInfos
         ConnectionChanged = $connectionChanged
         NeedsSelection = $needsSelection
+        StatusText = $statusText
     }
 }
 
@@ -717,7 +729,8 @@ function Show-UIHeader {
     $updateResult = Update-DeviceStatus -State $State
     $State = $updateResult.State
 
-    if (($updateResult.ConnectionChanged -or $ShowDeviceList) -and $updateResult.Devices.Count -gt 0) {
+    $shouldShowList = ($ShowDeviceList -or $updateResult.NeedsSelection) -and $updateResult.Devices.Count -gt 0
+    if ($shouldShowList) {
         Write-Host "`nAvailable devices:" -ForegroundColor Cyan
         for ($i = 0; $i -lt $updateResult.Devices.Count; $i++) {
             $info = $updateResult.Devices[$i]
@@ -736,15 +749,18 @@ function Show-UIHeader {
             $State.DeviceStatus.SerialNumber = $selected.Serial
             $updateResult = Update-DeviceStatus -State $State
             $State = $updateResult.State
+
+            return Show-UIHeader -State $State -Title $Title -SubTitle $SubTitle
         }
+
+        Write-Host ("─" * $width) -ForegroundColor Gray
+        return $State
     }
 
-    $statusText = "🔌 Status: "
-    if ($State.DeviceStatus.IsConnected) {
-        Write-Host "$statusText $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" -ForegroundColor Green
-    } else {
-        Write-ErrorMessage -Operation "Status" -Item "Disconnected" -Details "Please connect a device."
-    }
+    $statusText = $updateResult.StatusText
+    $statusPadding = [math]::Max(0, [math]::Floor(($width - $statusText.Length) / 2))
+    $color = if ($State.DeviceStatus.IsConnected) { 'Green' } else { 'Yellow' }
+    Write-Host ((" " * $statusPadding) + $statusText) -ForegroundColor $color
     Write-Host ("─" * $width) -ForegroundColor Gray
     return $State
 }
