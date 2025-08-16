@@ -1,5 +1,5 @@
 Describe "Get-AndroidDirectoryContents" {
-    . "$PSScriptRoot/../adb-file-manager.ps1"
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager.ps1" }
 
     It "returns files, directories, and links" {
         $state = @{ 

@@ -1731,6 +1731,21 @@ function Get-ItemEmoji {
     }
 }
 
+function Sort-BrowseItems {
+    param([psobject[]]$Items)
+    $list = [System.Collections.Generic.List[psobject]]::new([psobject[]]$Items)
+    $comparison = [System.Comparison[psobject]]{
+        param($a, $b)
+        $aRank = if ($a.Type -eq 'Directory') { 0 } else { 1 }
+        $bRank = if ($b.Type -eq 'Directory') { 0 } else { 1 }
+        $rankCompare = $aRank.CompareTo($bRank)
+        if ($rankCompare -ne 0) { return $rankCompare }
+        return [StringComparer]::InvariantCultureIgnoreCase.Compare($a.Name, $b.Name)
+    }
+    $list.Sort($comparison)
+    return ,@($list)
+}
+
 function Browse-AndroidFileSystem {
     param([hashtable]$State)
     $State = Show-UIHeader -State $State -Title "FILE BROWSER"
@@ -1749,8 +1764,9 @@ function Browse-AndroidFileSystem {
         # Cast the result to an array to prevent errors when a directory has only one item.
         $res = Get-AndroidDirectoryContents -State $State -Path $currentPath
         $State = $res.State
-        $items = @($res.Items |
-            Sort-Object -Property @{ Expression = { if ($_.Type -eq 'Directory') { 0 } else { 1 } } }, Name)
+
+        # Sort directories before files using a culture-invariant, case-insensitive comparer
+        $items = Sort-BrowseItems $res.Items
 
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         for ($i = 0; $i -lt $items.Count; $i++) {
@@ -2124,5 +2140,7 @@ function Start-ADBTool {
     Write-Host "`n👋 Thank you for using the ADB File Manager!" -ForegroundColor Green
 }
 
-# Start the application
-Start-ADBTool
+# Start the application when not dot-sourced
+if ($MyInvocation.InvocationName -ne '.') {
+    Start-ADBTool
+}
