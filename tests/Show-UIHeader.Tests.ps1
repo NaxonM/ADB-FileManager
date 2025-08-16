@@ -21,7 +21,7 @@ Describe "Show-UIHeader" {
             }
         }
 
-        $writes = @()
+        $script:writes = @()
         Mock Write-Host { param($Object) $script:writes += $Object }
 
         Show-UIHeader -State $state -SubTitle 'MAIN MENU' | Out-Null
