@@ -1053,6 +1053,7 @@ function Get-AndroidDirectoryContents {
 
     $chunkSize = 50
     $lines = @()
+    $lineFormat = ''
     if ($State.Features.SupportsFind) {
         $findCmd = "find '$listPath' -maxdepth 1 -mindepth 1"
         if ($State.Features.SupportsStatC) {
@@ -1060,36 +1061,33 @@ function Get-AndroidDirectoryContents {
         } else {
             $findCmd += " -exec ls -ld {} +"
         }
-        $cmdArgs = @('shell','sh','-c', "$findCmd 2>/dev/null || true")
+        $cmdArgs = @('shell','timeout','15s','sh','-c', "$findCmd 2>/dev/null")
         $result = Invoke-AdbCommand -State $State -Arguments $cmdArgs
         $State = $result.State
         $lines = $result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-    } else {
-        $listRes = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-1', "'$listPath'")
+        if (-not $result.Success -or $lines.Count -eq 0) {
+            Write-Log "Disabling 'find' due to failure or timeout; falling back to 'ls -al'." "WARN"
+            $State.Features.SupportsFind = $false
+            $lines = @()
+        } else {
+            $lineFormat = if ($State.Features.SupportsStatC) { 'stat' } else { 'ls' }
+        }
+    }
+    if (-not $State.Features.SupportsFind) {
+        $listRes = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-al', "'$listPath'")
         $State = $listRes.State
         if (-not $listRes.Success) {
             Write-Host ""
             Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $listRes.Output
             return [PSCustomObject]@{ State = $State; Items = @() }
         }
-        $entries = $listRes.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        foreach ($chunk in Split-IntoChunks -Items $entries -ChunkSize $chunkSize) {
-            if ($State.Features.SupportsStatC) {
-                $metaArgs = @('shell','stat','-c','%F|%s|%n') + ($chunk | ForEach-Object { "'$listPath/$_'" })
-            } else {
-                $metaArgs = @('shell','ls','-ld') + ($chunk | ForEach-Object { "'$listPath/$_'" })
-            }
-            $meta = Invoke-AdbCommand -State $State -Arguments $metaArgs
-            $State = $meta.State
-            if ($meta.Success) {
-                $lines += $meta.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            }
-        }
+        $lines = $listRes.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^total' }
+        $lineFormat = 'ls'
     }
 
     $items = @()
     foreach ($line in $lines) {
-        if ($State.Features.SupportsStatC) {
+        if ($lineFormat -eq 'stat') {
             if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
                 $path = $Matches.path.Trim()
                 $name = $path.Substring($path.LastIndexOf('/') + 1)
@@ -1116,6 +1114,7 @@ function Get-AndroidDirectoryContents {
             if ($line -match '^(?<perm>.).{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+\S+\s+\S+\s+\S+\s+(?<rest>.+)$') {
                 $path = ($Matches.rest -split '\s->\s')[0].Trim()
                 $name = $path.Substring($path.LastIndexOf('/') + 1)
+                if ($name -in '.', '..') { continue }
                 $aliasPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
                 if (-not (Test-AndroidPath $aliasPath)) { continue }
                 $type = switch ($Matches.perm) {
