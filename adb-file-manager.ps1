@@ -371,8 +371,16 @@ function Update-DeviceStatus {
 
     # If a device is connected and we checked less than 15 seconds ago, skip the check.
     if ($State.DeviceStatus.IsConnected -and ((Get-Date) - $State.LastStatusUpdateTime).TotalSeconds -lt 15) {
-        return $State
+        return [pscustomobject]@{
+            State = $State
+            Devices = @()
+            ConnectionChanged = $false
+            NeedsSelection = $false
+        }
     }
+
+    $prevConnected = $State.DeviceStatus.IsConnected
+    $prevSerial = $State.DeviceStatus.SerialNumber
 
     Write-Log "Performing full device status check." "DEBUG"
     $startResult = Invoke-AdbCommand -State $State -Arguments @('start-server') -NoSerial
@@ -395,17 +403,7 @@ function Update-DeviceStatus {
         Where-Object { $_.Status -eq 'device' }
     )
 
-    if ($deviceInfos.Count -gt 0) {
-        Write-Host "`nCleaned device list:" -ForegroundColor Cyan
-        $deviceInfos | ForEach-Object {
-            $statusLabel = if ($_.Status -eq 'device') { 'Online' } else { 'Offline' }
-            if ($_.Model) {
-                Write-Host "  $($_.Serial) - $($_.Model) ($statusLabel)"
-            } else {
-                Write-Host "  $($_.Serial) ($statusLabel)"
-            }
-        }
-    }
+    $needsSelection = $false
 
     if ($deviceInfos.Count -gt 0) {
         $serialNumber = $null
@@ -413,40 +411,37 @@ function Update-DeviceStatus {
         if ($State.DeviceStatus.SerialNumber -and ($deviceInfos.Serial -contains $State.DeviceStatus.SerialNumber)) {
             $serialNumber = $State.DeviceStatus.SerialNumber
             $selectedDevice = $deviceInfos | Where-Object { $_.Serial -eq $serialNumber } | Select-Object -First 1
-        } else {
-            Write-Host "`nAvailable devices:" -ForegroundColor Cyan
-            for ($i = 0; $i -lt $deviceInfos.Count; $i++) {
-                $info = $deviceInfos[$i]
-                $statusLabel = if ($info.Status -eq 'device') { 'Online' } else { 'Offline' }
-                $displayName = if ($info.Model) { $info.Model } else { $info.Serial }
-                Write-Host "  $($i + 1). $displayName ($statusLabel) - $($info.Serial)"
-            }
-            $selection = Read-Host "➡️  Enter the number of the device to use"
-            $choice = 0
-            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceInfos.Count) {
-                $choice = 1
-            }
-            $selectedDevice = $deviceInfos[$choice - 1]
+        } elseif ($deviceInfos.Count -eq 1) {
+            $selectedDevice = $deviceInfos[0]
             $serialNumber = $selectedDevice.Serial
-        }
-
-        $State.DeviceStatus.IsConnected = $true
-        $State.DeviceStatus.SerialNumber = $serialNumber
-
-        if ($selectedDevice.Model) {
-            $State.DeviceStatus.DeviceName = $selectedDevice.Model
         } else {
-            $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('shell', 'getprop', 'ro.product.model')
-            $State = $deviceNameResult.State
-            if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
-                $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
-            } else {
-                $State.DeviceStatus.DeviceName = "Unknown Device"
-            }
+            $needsSelection = $true
         }
-        Write-Log "Device connected: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" "INFO"
-        if (-not $State.Features.Checked) {
-            $State = Test-AdbFeatures -State $State
+
+        if (-not $needsSelection) {
+            $State.DeviceStatus.IsConnected = $true
+            $State.DeviceStatus.SerialNumber = $serialNumber
+
+            if ($selectedDevice.Model) {
+                $State.DeviceStatus.DeviceName = $selectedDevice.Model
+            } else {
+                $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('shell', 'getprop', 'ro.product.model')
+                $State = $deviceNameResult.State
+                if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
+                    $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
+                } else {
+                    $State.DeviceStatus.DeviceName = "Unknown Device"
+                }
+            }
+            Write-Log "Device connected: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" "INFO"
+            if (-not $State.Features.Checked) {
+                $State = Test-AdbFeatures -State $State
+            }
+        } else {
+            $State.DeviceStatus.IsConnected = $false
+            $State.DeviceStatus.DeviceName = "No Device"
+            $State.DeviceStatus.SerialNumber = ""
+            Write-Log "Multiple devices detected. Awaiting user selection." "INFO"
         }
     } else {
         $State.DeviceStatus.IsConnected = $false
@@ -456,9 +451,17 @@ function Update-DeviceStatus {
         $State.Features.Checked = $false
         $State.Features.SupportsDuSb = $false
     }
+
     # Update the timestamp after a full check.
     $State.LastStatusUpdateTime = (Get-Date)
-    return $State
+    $connectionChanged = ($prevConnected -ne $State.DeviceStatus.IsConnected) -or ($prevSerial -ne $State.DeviceStatus.SerialNumber)
+
+    return [pscustomobject]@{
+        State = $State
+        Devices = $deviceInfos
+        ConnectionChanged = $connectionChanged
+        NeedsSelection = $needsSelection
+    }
 }
 
 # Converts a path to Android-friendly format.
@@ -685,7 +688,8 @@ function Show-UIHeader {
     param(
         [hashtable]$State,
         [string]$Title = "ADB FILE MANAGER",
-        [string]$SubTitle
+        [string]$SubTitle,
+        [switch]$ShowDeviceList
     )
     Clear-Host
     $width = 62
@@ -710,7 +714,31 @@ function Show-UIHeader {
     Write-Host "║$blank║" -ForegroundColor Cyan
     Write-Host "╚$border╝" -ForegroundColor Cyan
 
-    $State = Update-DeviceStatus -State $State
+    $updateResult = Update-DeviceStatus -State $State
+    $State = $updateResult.State
+
+    if (($updateResult.ConnectionChanged -or $ShowDeviceList) -and $updateResult.Devices.Count -gt 0) {
+        Write-Host "`nAvailable devices:" -ForegroundColor Cyan
+        for ($i = 0; $i -lt $updateResult.Devices.Count; $i++) {
+            $info = $updateResult.Devices[$i]
+            $statusLabel = if ($info.Status -eq 'device') { 'Online' } else { 'Offline' }
+            $displayName = if ($info.Model) { $info.Model } else { $info.Serial }
+            Write-Host "  $($i + 1). $displayName ($statusLabel) - $($info.Serial)"
+        }
+
+        if ($updateResult.NeedsSelection -or $ShowDeviceList) {
+            $selection = Read-Host "➡️  Enter the number of the device to use"
+            $choice = 0
+            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $updateResult.Devices.Count) {
+                $choice = 1
+            }
+            $selected = $updateResult.Devices[$choice - 1]
+            $State.DeviceStatus.SerialNumber = $selected.Serial
+            $updateResult = Update-DeviceStatus -State $State
+            $State = $updateResult.State
+        }
+    }
+
     $statusText = "🔌 Status: "
     if ($State.DeviceStatus.IsConnected) {
         Write-Host "$statusText $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" -ForegroundColor Green
@@ -2042,6 +2070,7 @@ function Show-MainMenu {
         Write-Host " 1. Browse Device Filesystem (Interactive Push/Pull/Manage)"
         Write-Host " 2. Quick Push (from PC to a specified device path)"
         Write-Host " 3. Quick Pull (from a specified device path to PC)"
+        Write-Host " R. Refresh Device List"
         Write-Host ""
         Write-Host " Q. Exit"
         Write-Host ""
@@ -2059,6 +2088,11 @@ function Show-MainMenu {
             '1' { $State = Browse-AndroidFileSystem -State $State }
             '2' { $State = Push-FilesToAndroid -State $State }
             '3' { $State = Pull-FilesFromAndroid -State $State }
+            'r' {
+                $State = Show-UIHeader -State $State -SubTitle "MAIN MENU" -ShowDeviceList
+                Read-Host "Press Enter to continue"
+                continue
+            }
             'q' { return $State }
             default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
