@@ -1092,6 +1092,29 @@ function Get-AndroidDirectoryContents {
         }
     }
 
+    # Resolve any items not yet confirmed as directories using additional checks
+    $unverifiedItems = $items | Where-Object { $_.Type -notin 'Directory','Link' }
+    if ($unverifiedItems.Count -gt 0) {
+        $lsArgs  = @('shell','ls','-p','-d') + ($unverifiedItems | ForEach-Object { "'$($_.FullPath)'" })
+        $lsProbe = Invoke-AdbCommand -State $State -Arguments $lsArgs
+        $State   = $lsProbe.State
+        if ($lsProbe.Success) {
+            $lines = $lsProbe.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            for ($i = 0; $i -lt $unverifiedItems.Count -and $i -lt $lines.Count; $i++) {
+                $line = $lines[$i]
+                $item = $unverifiedItems[$i]
+                $item.Type = if ($line.EndsWith('/')) { 'Directory' } else { 'File' }
+            }
+        }
+        foreach ($item in ($unverifiedItems | Where-Object { $_.Type -notin 'Directory','File' })) {
+            $typeCheck = Test-AndroidItemIsDirectory -State $State -Path $item.FullPath
+            $State = $typeCheck.State
+            if ($typeCheck.Success) {
+                $item.Type = if ($typeCheck.IsDirectory) { 'Directory' } else { 'File' }
+            }
+        }
+    }
+
     # Store the fresh result in the cache using the canonical path as the key
     Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $canonicalKey -Value $items -MaxEntries $State.MaxDirectoryCacheEntries -Aliases $State.DirectoryCacheAliases
     return [PSCustomObject]@{ State = $State; Items = $items }
