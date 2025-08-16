@@ -377,45 +377,72 @@ function Update-DeviceStatus {
     Write-Log "Performing full device status check." "DEBUG"
     $startResult = Invoke-AdbCommand -State $State -Arguments @('start-server') -NoSerial
     $State = $startResult.State
-    $result = Invoke-AdbCommand -State $State -Arguments @('devices') -NoSerial
+    $result = Invoke-AdbCommand -State $State -Arguments @('devices','-l') -NoSerial
     $State = $result.State
-    $deviceLines = @(
+    $deviceInfos = @(
         $result.Output -split '\r?\n' |
-        Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() }
+        Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() } |
+        ForEach-Object {
+            $parts = $_ -split '\s+'
+            if ($parts.Length -ge 2) {
+                $serial = $parts[0].Trim()
+                $status = $parts[1].Trim()
+                $modelToken = $parts | Where-Object { $_ -like 'model:*' } | Select-Object -First 1
+                $model = if ($modelToken) { $modelToken -replace '^model:' } else { $null }
+                [pscustomobject]@{Serial=$serial; Status=$status; Model=$model}
+            }
+        } |
+        Where-Object { $_.Status -eq 'device' }
     )
 
-    if ($deviceLines.Count -gt 0) {
+    if ($deviceInfos.Count -gt 0) {
         Write-Host "`nCleaned device list:" -ForegroundColor Cyan
-        $deviceLines | ForEach-Object { Write-Host "  $_" }
+        $deviceInfos | ForEach-Object {
+            $statusLabel = if ($_.Status -eq 'device') { 'Online' } else { 'Offline' }
+            if ($_.Model) {
+                Write-Host "  $($_.Serial) - $($_.Model) ($statusLabel)"
+            } else {
+                Write-Host "  $($_.Serial) ($statusLabel)"
+            }
+        }
     }
 
-    if ($deviceLines.Count -gt 0) {
-        $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
+    if ($deviceInfos.Count -gt 0) {
         $serialNumber = $null
-        if ($State.DeviceStatus.SerialNumber -and ($serials -contains $State.DeviceStatus.SerialNumber)) {
+        $selectedDevice = $null
+        if ($State.DeviceStatus.SerialNumber -and ($deviceInfos.Serial -contains $State.DeviceStatus.SerialNumber)) {
             $serialNumber = $State.DeviceStatus.SerialNumber
+            $selectedDevice = $deviceInfos | Where-Object { $_.Serial -eq $serialNumber } | Select-Object -First 1
         } else {
             Write-Host "`nAvailable devices:" -ForegroundColor Cyan
-            for ($i = 0; $i -lt $deviceLines.Count; $i++) {
-                Write-Host "  $($i + 1). $($deviceLines[$i])"
+            for ($i = 0; $i -lt $deviceInfos.Count; $i++) {
+                $info = $deviceInfos[$i]
+                $statusLabel = if ($info.Status -eq 'device') { 'Online' } else { 'Offline' }
+                $displayName = if ($info.Model) { $info.Model } else { $info.Serial }
+                Write-Host "  $($i + 1). $displayName ($statusLabel) - $($info.Serial)"
             }
             $selection = Read-Host "➡️  Enter the number of the device to use"
             $choice = 0
-            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
+            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceInfos.Count) {
                 $choice = 1
             }
-            $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
+            $selectedDevice = $deviceInfos[$choice - 1]
+            $serialNumber = $selectedDevice.Serial
         }
 
         $State.DeviceStatus.IsConnected = $true
         $State.DeviceStatus.SerialNumber = $serialNumber
 
-        $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('shell', 'getprop', 'ro.product.model')
-        $State = $deviceNameResult.State
-        if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
-            $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
+        if ($selectedDevice.Model) {
+            $State.DeviceStatus.DeviceName = $selectedDevice.Model
         } else {
-            $State.DeviceStatus.DeviceName = "Unknown Device"
+            $deviceNameResult = Invoke-AdbCommand -State $State -Arguments @('shell', 'getprop', 'ro.product.model')
+            $State = $deviceNameResult.State
+            if ($deviceNameResult.Success -and -not [string]::IsNullOrWhiteSpace($deviceNameResult.Output)) {
+                $State.DeviceStatus.DeviceName = $deviceNameResult.Output.Trim()
+            } else {
+                $State.DeviceStatus.DeviceName = "Unknown Device"
+            }
         }
         Write-Log "Device connected: $($State.DeviceStatus.DeviceName) ($($State.DeviceStatus.SerialNumber))" "INFO"
         if (-not $State.Features.Checked) {
