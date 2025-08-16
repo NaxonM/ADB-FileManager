@@ -1767,7 +1767,8 @@ function Browse-AndroidFileSystem {
         # Cast the result to an array to prevent errors when a directory has only one item.
         $res = Get-AndroidDirectoryContents -State $State -Path $currentPath
         $State = $res.State
-        $items = @($res.Items)
+        $items = @($res.Items |
+            Sort-Object -Property @{ Expression = { if ($_.Type -eq 'Directory') { 0 } else { 1 } } }, Name)
 
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         for ($i = 0; $i -lt $items.Count; $i++) {
