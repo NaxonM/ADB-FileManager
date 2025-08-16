@@ -383,27 +383,26 @@ function Update-DeviceStatus {
         Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() }
 
     if ($deviceLines.Count -gt 0) {
-        Write-Log "Detected devices: $($deviceLines -join ', ')" "DEBUG"
+        Write-Host "`nCleaned device list:" -ForegroundColor Cyan
+        $deviceLines | ForEach-Object { Write-Host "  $_" }
     }
 
     if ($deviceLines.Count -gt 0) {
         $serials = $deviceLines | ForEach-Object { ($_ -split '\s+')[0].Trim() }
-        $serialNumber = $State.DeviceStatus.SerialNumber
-        if (-not $serialNumber -or -not ($serials -contains $serialNumber)) {
-            if ($deviceLines.Count -gt 1) {
-                Write-Host "`nAvailable devices:" -ForegroundColor Cyan
-                for ($i = 0; $i -lt $deviceLines.Count; $i++) {
-                    Write-Host "  $($i + 1). $($deviceLines[$i])"
-                }
-                $selection = Read-Host "➡️  Enter the number of the device to use"
-                $choice = 0
-                if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
-                    $choice = 1
-                }
-                $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
-            } else {
-                $serialNumber = $serials[0]
+        $serialNumber = $null
+        if ($State.DeviceStatus.SerialNumber -and ($serials -contains $State.DeviceStatus.SerialNumber)) {
+            $serialNumber = $State.DeviceStatus.SerialNumber
+        } else {
+            Write-Host "`nAvailable devices:" -ForegroundColor Cyan
+            for ($i = 0; $i -lt $deviceLines.Count; $i++) {
+                Write-Host "  $($i + 1). $($deviceLines[$i])"
             }
+            $selection = Read-Host "➡️  Enter the number of the device to use"
+            $choice = 0
+            if (-not [int]::TryParse($selection, [ref]$choice) -or $choice -lt 1 -or $choice -gt $deviceLines.Count) {
+                $choice = 1
+            }
+            $serialNumber = ($deviceLines[$choice - 1] -split '\s+')[0]
         }
 
         $State.DeviceStatus.IsConnected = $true
@@ -947,7 +946,12 @@ function Get-AndroidDirectoryContents {
 
     # Use the canonical path for the 'ls' command to get just names; details come from stat.
     $lsArgs = @('shell','ls')
-    $lsArgs += ($State.Config.VerboseLists ? '-lA' : '-1A')
+    if ($State.Config.VerboseLists) {
+        $lsArgs += '-l'
+    } else {
+        $lsArgs += '-1'
+    }
+    $lsArgs += '-A'
     $lsArgs += "'$listPath'"
     $result = Invoke-AdbCommand -State $State -Arguments $lsArgs
     $State = $result.State
