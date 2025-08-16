@@ -379,8 +379,10 @@ function Update-DeviceStatus {
     $State = $startResult.State
     $result = Invoke-AdbCommand -State $State -Arguments @('devices') -NoSerial
     $State = $result.State
-    [string[]]$deviceLines = $result.Output -split '\r?\n' |
+    $deviceLines = @(
+        $result.Output -split '\r?\n' |
         Where-Object { $_ -notmatch '^(List of devices attached|\* daemon)' -and $_.Trim() }
+    )
 
     if ($deviceLines.Count -gt 0) {
         Write-Host "`nCleaned device list:" -ForegroundColor Cyan
@@ -963,7 +965,7 @@ function Get-AndroidDirectoryContents {
     }
 
     $items = @()
-    $names = $result.Output -split '\r?\n' | Where-Object { $_ }
+    $names = $result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
     if ($null -eq $State.Features.SupportsStatC) {
         $probe = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n','/')
@@ -975,124 +977,80 @@ function Get-AndroidDirectoryContents {
         }
     }
 
-    $entries = @()
     foreach ($name in $names) {
-        $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
+        $nameTrim = $name.Trim()
+        $fullPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$nameTrim" } else { "$cacheKey/$nameTrim" }
         if (-not (Test-AndroidPath $fullPath)) {
             Write-Log "Skipping item with unsafe path: $fullPath" "WARN" -SanitizePaths
             continue
         }
-        $statPath = if ($listPath.EndsWith('/')) { "$listPath$name" } else { "$listPath/$name" }
-        $entries += [PSCustomObject]@{ Name = $name.Trim(); FullPath = $fullPath; StatPath = $statPath }
-    }
 
-    if ($entries.Count -eq 0) {
-        return [PSCustomObject]@{ State = $State; Items = @() }
-    }
+        $statPath = if ($listPath.EndsWith('/')) { "$listPath$nameTrim" } else { "$listPath/$nameTrim" }
+        $type = 'Other'
+        $size = 0L
 
-    $pathMap = @{}
-    $quotedPaths = @()
-    foreach ($e in $entries) {
-        $pathMap[$e.StatPath] = $e
-        $quoted = $e.StatPath.Replace("'", "'\''")
-        $quotedPaths += "'$quoted'"
-    }
-
-    if ($State.Features.SupportsStatC) {
-        $cmd = "for p in $($quotedPaths -join ' '); do stat -c '%F|%s|%n' `"`$p`"; done"
-        $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','sh','-c', $cmd)
-        $State = $statResult.State
-        if ($statResult.Success) {
-            $lines = $statResult.Output -split '\r?\n' | Where-Object { $_ }
-            foreach ($line in $lines) {
-                if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
-                    $path = $Matches.path.Trim()
-                    if ($pathMap.ContainsKey($path)) {
-                        $entry = $pathMap[$path]
-                        $typeStr = $Matches.type
-                        $type = switch -regex ($typeStr) {
-                            '^directory$'       { 'Directory' }
-                            '^regular file$'    { 'File' }
-                            '^symbolic link.*$' {
-                                $linkType = 'Link'
-                                $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$path'")
-                                $State = $target.State
-                                if (-not ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output))) {
-                                    $target = Invoke-AdbCommand -State $State -Arguments @('shell','realpath', "'$path'")
-                                    $State = $target.State
-                                }
-                                if ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output)) {
-                                    $targetInfo = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F', "'$($target.Output.Trim())'")
-                                    $State = $targetInfo.State
-                                    if ($targetInfo.Success -and $targetInfo.Output.Trim() -eq 'directory') { $linkType = 'Directory' }
-                                }
-                                $linkType
-                            }
-                            default { 'Other' }
+        if ($State.Features.SupportsStatC) {
+            $statResult = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n', "'$statPath'")
+            $State = $statResult.State
+            if ($statResult.Success -and $statResult.Output -match '^(?<type>.+)\|(?<size>\d+)\|(?<n>.+)$') {
+                $typeStr = $Matches.type
+                $type = switch -regex ($typeStr) {
+                    '^directory$'       { 'Directory' }
+                    '^regular file$'    { 'File' }
+                    '^symbolic link.*$' {
+                        $linkType = 'Link'
+                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
+                        $State = $target.State
+                        if ($target.Success -and -not [string]::IsNullOrWhiteSpace($target.Output)) {
+                            $targetInfo = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F', "'$($target.Output.Trim())'")
+                            $State = $targetInfo.State
+                            if ($targetInfo.Success -and $targetInfo.Output.Trim() -eq 'directory') { $linkType = 'Directory' }
                         }
-                        $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
-                        $items += [PSCustomObject]@{
-                            Name        = $entry.Name
-                            Type        = $type
-                            Permissions = ''
-                            FullPath    = $entry.FullPath
-                            Size        = $size
+                        $linkType
+                    }
+                    default { 'Other' }
+                }
+                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
+            }
+        }
+        else {
+            $lsResult = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$statPath'")
+            $State = $lsResult.State
+            if ($lsResult.Success -and -not [string]::IsNullOrWhiteSpace($lsResult.Output)) {
+                $typeChar = $lsResult.Output[0]
+                switch ($typeChar) {
+                    'd' { $type = 'Directory' }
+                    'l' {
+                        $linkType = 'Link'
+                        $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$statPath'")
+                        $State = $target.State
+                        if ($target.Success -and $target.Output) {
+                            $targetLs = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$($target.Output.Trim())'")
+                            $State = $targetLs.State
+                            if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
+                        }
+                        $type = $linkType
+                    }
+                    '-' {
+                        $type = 'File'
+                        if ($lsResult.Output -match '^.{10}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)') {
+                            $size = [long]$Matches.size
                         }
                     }
+                    default { $type = 'Other' }
                 }
             }
         }
-    }
-    else {
-        $cmd = "for p in $($quotedPaths -join ' '); do ls -ld `"`$p`"; done"
-        $lsResult = Invoke-AdbCommand -State $State -Arguments @('shell','sh','-c', $cmd)
-        $State = $lsResult.State
-        if ($lsResult.Success) {
-            $lines = $lsResult.Output -split '\r?\n' | Where-Object { $_ }
-            foreach ($line in $lines) {
-                if ($line -match '^.{10}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+.+?\s+(?<path>.+)$') {
-                    $path = $Matches.path.Trim()
-                    if ($pathMap.ContainsKey($path)) {
-                        $entry = $pathMap[$path]
-                        $typeChar = $line[0]
-                        $type = 'Other'
-                        $size = 0L
-                        switch ($typeChar) {
-                            'd' { $type = 'Directory' }
-                            'l' {
-                                $linkType = 'Link'
-                                $target = Invoke-AdbCommand -State $State -Arguments @('shell','readlink','-f', "'$path'")
-                                $State = $target.State
-                                if (-not ($target.Success -and $target.Output)) {
-                                    $target = Invoke-AdbCommand -State $State -Arguments @('shell','realpath', "'$path'")
-                                    $State = $target.State
-                                }
-                                if ($target.Success -and $target.Output) {
-                                    $targetLs = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-ld', "'$($target.Output.Trim())'")
-                                    $State = $targetLs.State
-                                    if ($targetLs.Success -and $targetLs.Output.StartsWith('d')) { $linkType = 'Directory' }
-                                }
-                                $type = $linkType
-                            }
-                            '-' {
-                                $type = 'File'
-                                $size = [long]$Matches.size
-                            }
-                            default { $type = 'Other' }
-                        }
-                        $items += [PSCustomObject]@{
-                            Name        = $entry.Name
-                            Type        = $type
-                            Permissions = ''
-                            FullPath    = $entry.FullPath
-                            Size        = $size
-                        }
-                    }
-                }
-            }
+
+        $items += [PSCustomObject]@{
+            Name        = $nameTrim
+            Type        = $type
+            Permissions = ''
+            FullPath    = $fullPath
+            Size        = $size
         }
     }
-    
+
     # Store the fresh result in the cache using the canonical path as the key
     Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $canonicalKey -Value $items -MaxEntries $State.MaxDirectoryCacheEntries -Aliases $State.DirectoryCacheAliases
     return [PSCustomObject]@{ State = $State; Items = $items }
