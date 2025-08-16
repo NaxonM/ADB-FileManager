@@ -1800,10 +1800,47 @@ function Browse-AndroidFileSystem {
 
     do {
         Clear-Host
-        Write-Host "Loading directory..." -ForegroundColor Yellow
+        $loadingMsg = "Loading directory..."
+        Write-Host -NoNewline $loadingMsg -ForegroundColor Yellow
+
+        $job = Start-Job -ScriptBlock {
+            param($s,$p,$root)
+            . (Join-Path $root 'adb-file-manager.ps1') -NoGui
+            Get-AndroidDirectoryContents -State $s -Path $p
+        } -ArgumentList $State,$currentPath,$PSScriptRoot
+
+        $spinner = @('|','/','-','\')
+        $idx = 0
+        $timeout = (Get-Date).AddSeconds(30)
+        while ($job.State -eq 'Running') {
+            Write-Host $spinner[$idx % $spinner.Length] -NoNewline
+            Start-Sleep -Milliseconds 200
+            Write-Host "`b" -NoNewline
+            if ((Get-Date) -gt $timeout) {
+                Stop-Job $job | Out-Null
+                Remove-Job $job | Out-Null
+                Write-Host "`r" + (' ' * ($loadingMsg.Length + 2)) + "`r" -NoNewline
+                Write-ErrorMessage -Operation "Directory listing timed out"
+                Start-Sleep -Seconds 1
+                return $State
+            }
+            $idx++
+        }
+
+        $res = Receive-Job $job -ErrorAction SilentlyContinue
+        $jobErrors = $job.ChildJobs | ForEach-Object { $_.Error } | Where-Object { $_ }
+        Remove-Job $job | Out-Null
+
+        Write-Host "`r" + (' ' * ($loadingMsg.Length + 2)) + "`r" -NoNewline
+
+        if (-not $res -or $jobErrors) {
+            Write-ErrorMessage -Operation "Failed to load directory"
+            Start-Sleep -Seconds 1
+            return $State
+        }
 
         # Cast the result to an array to prevent errors when a directory has only one item.
-        $res = Get-AndroidDirectoryContents -State $State -Path $currentPath
+        $res.Items = @($res.Items)
         $State = $res.State
 
         # Sort directories before files using a culture-invariant, case-insensitive comparer
