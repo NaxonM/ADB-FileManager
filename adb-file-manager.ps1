@@ -1788,6 +1788,80 @@ function Sort-BrowseItems {
     return ,@($list)
 }
 
+function Get-AndroidDirectoryContentsJob {
+    param(
+        [hashtable]$State,
+        [string]$Path,
+        [scriptblock]$Fetcher = { param($s,$p) Get-AndroidDirectoryContents -State $s -Path $p },
+        [int]$TimeoutSeconds = 30,
+        [switch]$ShowSpinner
+    )
+
+    $stateClone = $State | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+
+    try {
+        if ($script:IsPSCore -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
+            $job = Start-ThreadJob -ScriptBlock { param($s,$p,$f) & $f $s $p } -ArgumentList $stateClone,$Path,$Fetcher
+            $spinner = @('|','/','-','\\')
+            $idx = 0
+            $timeout = (Get-Date).AddSeconds($TimeoutSeconds)
+            while ($job.State -eq 'Running' -and (Get-Date) -lt $timeout) {
+                if ($ShowSpinner) {
+                    Write-Host $spinner[$idx % $spinner.Length] -NoNewline
+                    Start-Sleep -Milliseconds 200
+                    Write-Host "`b" -NoNewline
+                } else {
+                    Start-Sleep -Milliseconds 200
+                }
+                $idx++
+            }
+            if ($job.State -eq 'Running') {
+                Stop-Job $job | Out-Null
+                Remove-Job $job | Out-Null
+                throw 'Timeout'
+            }
+            Wait-Job $job | Out-Null
+            $res = Receive-Job $job -ErrorAction SilentlyContinue
+            $jobErrors = $job.ChildJobs | ForEach-Object { $_.Error } | Where-Object { $_ }
+            Remove-Job $job -Force | Out-Null
+            if (-not $res -or $jobErrors) { throw 'JobFailed' }
+            return $res
+        } else {
+            $ps = [powershell]::Create()
+            $rs = [runspacefactory]::CreateRunspace()
+            $rs.Open()
+            $ps.Runspace = $rs
+            $ps.AddScript({ param($s,$p,$f) & $f $s $p }) | Out-Null
+            $ps.AddArgument($stateClone)
+            $ps.AddArgument($Path)
+            $ps.AddArgument($Fetcher)
+            $handle = $ps.BeginInvoke()
+            $spinner = @('|','/','-','\\')
+            $idx = 0
+            $timeout = (Get-Date).AddSeconds($TimeoutSeconds)
+            while (-not $handle.IsCompleted -and (Get-Date) -lt $timeout) {
+                if ($ShowSpinner) {
+                    Write-Host $spinner[$idx % $spinner.Length] -NoNewline
+                    Start-Sleep -Milliseconds 200
+                    Write-Host "`b" -NoNewline
+                } else {
+                    Start-Sleep -Milliseconds 200
+                }
+                $idx++
+            }
+            if (-not $handle.IsCompleted) {
+                $ps.Stop()
+                throw 'Timeout'
+            }
+            $res = $ps.EndInvoke($handle)
+            $ps.Dispose()
+            return $res
+        }
+    } catch {
+        return & $Fetcher $State $Path
+    }
+}
+
 function Browse-AndroidFileSystem {
     param([hashtable]$State)
     $State = Show-UIHeader -State $State -Title "FILE BROWSER"
@@ -1803,37 +1877,11 @@ function Browse-AndroidFileSystem {
         $loadingMsg = "Loading directory..."
         Write-Host -NoNewline $loadingMsg -ForegroundColor Yellow
 
-        $job = Start-Job -ScriptBlock {
-            param($s,$p,$root)
-            . (Join-Path $root 'adb-file-manager.ps1') -NoGui
-            Get-AndroidDirectoryContents -State $s -Path $p
-        } -ArgumentList $State,$currentPath,$PSScriptRoot
-
-        $spinner = @('|','/','-','\')
-        $idx = 0
-        $timeout = (Get-Date).AddSeconds(30)
-        while ($job.State -eq 'Running') {
-            Write-Host $spinner[$idx % $spinner.Length] -NoNewline
-            Start-Sleep -Milliseconds 200
-            Write-Host "`b" -NoNewline
-            if ((Get-Date) -gt $timeout) {
-                Stop-Job $job | Out-Null
-                Remove-Job $job | Out-Null
-                Write-Host "`r" + (' ' * ($loadingMsg.Length + 2)) + "`r" -NoNewline
-                Write-ErrorMessage -Operation "Directory listing timed out"
-                Start-Sleep -Seconds 1
-                return $State
-            }
-            $idx++
-        }
-
-        $res = Receive-Job $job -ErrorAction SilentlyContinue
-        $jobErrors = $job.ChildJobs | ForEach-Object { $_.Error } | Where-Object { $_ }
-        Remove-Job $job | Out-Null
+        $res = Get-AndroidDirectoryContentsJob -State $State -Path $currentPath -ShowSpinner
 
         Write-Host "`r" + (' ' * ($loadingMsg.Length + 2)) + "`r" -NoNewline
 
-        if (-not $res -or $jobErrors) {
+        if (-not $res -or -not $res.Items) {
             Write-ErrorMessage -Operation "Failed to load directory"
             Start-Sleep -Seconds 1
             return $State

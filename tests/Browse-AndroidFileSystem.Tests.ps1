@@ -37,3 +37,34 @@ Describe "Sort-BrowseItems" {
         $sortedNames | Should -Be @('Banana','Яблоко','ábaco','Éclair')
     }
 }
+
+Describe "Get-AndroidDirectoryContentsJob" {
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager.ps1" }
+
+    It "returns items from background job" {
+        $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
+        $real = (Get-Command Start-ThreadJob).ScriptBlock
+        Mock Start-ThreadJob { & $real @PSBoundParameters } -Verifiable
+        $fetcher = {
+            param($s,$p)
+            return [pscustomobject]@{ State = $s; Items = 1..200 | ForEach-Object { [pscustomobject]@{ Name = "f$_"; Type = 'File' } } }
+        }
+        $res = Get-AndroidDirectoryContentsJob -State $state -Path '/big' -Fetcher $fetcher -ShowSpinner:$false
+        ($res.Items).Count | Should -Be 200
+        Assert-MockCalled Start-ThreadJob -Times 1 -Exactly
+    }
+
+    It "falls back to synchronous call when job fails" {
+        $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
+        $global:syncCalled = $false
+        $fetcher = {
+            param($s,$p)
+            $global:syncCalled = $true
+            return [pscustomobject]@{ State = $s; Items = @('a') }
+        }
+        Mock Start-ThreadJob { throw 'no threads' }
+        $res = Get-AndroidDirectoryContentsJob -State $state -Path '/big' -Fetcher $fetcher -ShowSpinner:$false
+        $global:syncCalled | Should -BeTrue
+        ($res.Items).Count | Should -Be 1
+    }
+}
