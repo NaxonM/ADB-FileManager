@@ -68,3 +68,29 @@ Describe "Get-AndroidDirectoryContentsJob" {
         ($res.Items).Count | Should -Be 1
     }
 }
+
+Describe "Browse-AndroidFileSystem job error handling" {
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager.ps1" }
+
+    It "shows job error details in UI and log" {
+        $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
+        Mock Show-UIHeader { param($State, $Title) return $State }
+        Mock Read-Host { '/invalid' }
+        Mock Clear-Host {}
+        Mock Start-Sleep {}
+        Mock Test-AndroidPath { $true }
+        $realJob = (Get-Command Get-AndroidDirectoryContentsJob).ScriptBlock
+        Mock Get-AndroidDirectoryContentsJob {
+            $params = $PSBoundParameters
+            $params['Fetcher'] = { param($s,$p) throw 'invalid path' }
+            & $realJob @params
+        }
+        $script:logged = @()
+        Mock Write-Log { param($Message,$Level) $script:logged += $Message }
+        $script:errorDetails = $null
+        Mock Write-ErrorMessage { param($Operation,$Item,$Details) $script:errorDetails = $Details }
+        Browse-AndroidFileSystem -State $state | Out-Null
+        $script:errorDetails | Should -Match 'invalid path'
+        ($script:logged -join "`n") | Should -Match 'invalid path'
+    }
+}
