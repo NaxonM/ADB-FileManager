@@ -1935,6 +1935,7 @@ function Browse-AndroidFileSystem {
                 Write-Host "`n🔄 Refreshing directory..." -ForegroundColor Yellow
                 $State = Invalidate-DirectoryCache -State $State -DirectoryPath $currentPath
                 Start-Sleep -Seconds 1
+                Clear-Host
             }
             "0" {
                 if ($currentPath -ne "/" -and $currentPath -ne "") {
@@ -1947,6 +1948,7 @@ function Browse-AndroidFileSystem {
                     } else {
                         $currentPath = "/"
                     }
+                    Clear-Host
                 }
             }
             default {
@@ -1956,16 +1958,20 @@ function Browse-AndroidFileSystem {
                     if ($selectedItem.Type -in "Directory", "Link") {
                         if (Test-AndroidPath $selectedItem.FullPath) {
                             $currentPath = $selectedItem.FullPath
+                            Clear-Host
                         } else {
                             Write-ErrorMessage -Operation "Invalid path"
                             Start-Sleep -Seconds 1
+                            Clear-Host
                         }
                     } else {
                         $State = Show-ItemActionMenu -State $State -Item $selectedItem
+                        Clear-Host
                     }
                 } else {
                     Write-ErrorMessage -Operation "Invalid selection"
                     Start-Sleep -Seconds 1
+                    Clear-Host
                 }
             }
         }
