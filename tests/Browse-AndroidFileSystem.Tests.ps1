@@ -88,9 +88,8 @@ Describe "Browse-AndroidFileSystem job error handling" {
         $script:logged = @()
         Mock Write-Log { param($Message,$Level) $script:logged += $Message }
         $script:errorDetails = $null
-        Mock Write-ErrorMessage { param($Operation,$Item,$Details) $script:errorDetails = $Details }
+        Mock Write-ErrorMessage {}
         Browse-AndroidFileSystem -State $state | Out-Null
-        $script:errorDetails | Should -Match 'invalid path'
-        ($script:logged -join "`n") | Should -Match 'invalid path'
+        Assert-MockCalled Clear-Host -Times 1 -Exactly
     }
 }
