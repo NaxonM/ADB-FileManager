@@ -68,6 +68,23 @@ Describe "Get-AndroidDirectoryContentsJob" {
         ($res.Items).Count | Should -Be 1
     }
 
+    It "retries synchronously when job returns invalid result" {
+        $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
+        $script:syncCalls = 0
+        $fetcher = {
+            param($s,$p)
+            $script:syncCalls++
+            return [pscustomobject]@{ State = $s; Items = @([pscustomobject]@{ Name = 'file'; Type = 'File'; FullPath = '/big/file' }) }
+        }
+        Mock Start-ThreadJob { [pscustomobject]@{ State = 'Completed'; ChildJobs = @() } }
+        Mock Wait-Job {}
+        Mock Receive-Job { [pscustomobject]@{ Items = $null } }
+        Mock Remove-Job {}
+        $res = Get-AndroidDirectoryContentsJob -State $state -Path '/big' -Fetcher $fetcher -ShowSpinner:$false
+        $script:syncCalls | Should -Be 1
+        ($res.Items | ForEach-Object { $_.Name }) | Should -Contain 'file'
+    }
+
     It "returns items when cache is already populated" {
         $state = @{
             DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
