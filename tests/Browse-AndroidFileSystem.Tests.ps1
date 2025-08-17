@@ -67,6 +67,23 @@ Describe "Get-AndroidDirectoryContentsJob" {
         $global:syncCalled | Should -BeTrue
         ($res.Items).Count | Should -Be 1
     }
+
+    It "returns items when cache is already populated" {
+        $state = @{
+            DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+            DirectoryCacheAliases = @{}
+            Features = @{}
+            Config = @{}
+            MaxDirectoryCacheEntries = 100
+        }
+        $state.DirectoryCache['/cached'] = @([pscustomobject]@{ Name = 'old'; Type = 'File'; FullPath = '/cached/old'; Size = 0 })
+        $state.DirectoryCacheAliases['/cached'] = '/cached'
+        $fetcher = { param($s,$p) Get-AndroidDirectoryContents -State $s -Path $p }
+        $real = (Get-Command Start-ThreadJob).ScriptBlock
+        Mock Start-ThreadJob { & $real @PSBoundParameters }
+        $res = Get-AndroidDirectoryContentsJob -State $state -Path '/cached' -Fetcher $fetcher -ShowSpinner:$false
+        $res.Items | Should -Not -BeNullOrEmpty
+    }
 }
 
 Describe "Browse-AndroidFileSystem job error handling" {
