@@ -1797,7 +1797,18 @@ function Get-AndroidDirectoryContentsJob {
         [switch]$ShowSpinner
     )
 
-    $stateClone = $State | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    # Create a shallow clone of state excluding non-serializable cache members.
+    $stateClone = @{}
+    foreach ($key in $State.Keys) {
+        switch ($key) {
+            'DirectoryCache'       { $stateClone[$key] = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal) }
+            'DirectoryCacheAliases'{ $stateClone[$key] = @{} }
+            default {
+                $val = $State[$key]
+                if ($val -is [hashtable]) { $stateClone[$key] = $val.Clone() } else { $stateClone[$key] = $val }
+            }
+        }
+    }
 
     try {
         if ($script:IsPSCore -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
@@ -1828,6 +1839,23 @@ function Get-AndroidDirectoryContentsJob {
             Remove-Job $job -Force | Out-Null
             if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
             $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobErrorText
+            if ($res.State) {
+                foreach ($k in $res.State.Keys) {
+                    if ($k -in 'DirectoryCache','DirectoryCacheAliases') { continue }
+                    $State[$k] = $res.State[$k]
+                }
+                if ($res.State.DirectoryCache) {
+                    foreach ($ck in $res.State.DirectoryCache.Keys) {
+                        Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $ck -Value $res.State.DirectoryCache[$ck] -MaxEntries $State.MaxDirectoryCacheEntries -Aliases $State.DirectoryCacheAliases
+                    }
+                }
+                if ($res.State.DirectoryCacheAliases) {
+                    foreach ($alias in $res.State.DirectoryCacheAliases.Keys) {
+                        $State.DirectoryCacheAliases[$alias] = $res.State.DirectoryCacheAliases[$alias]
+                    }
+                }
+            }
+            $res.State = $State
             return $res
         } else {
             $ps = [powershell]::Create()
@@ -1860,6 +1888,23 @@ function Get-AndroidDirectoryContentsJob {
             $ps.Dispose()
             if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
             $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue ""
+            if ($res.State) {
+                foreach ($k in $res.State.Keys) {
+                    if ($k -in 'DirectoryCache','DirectoryCacheAliases') { continue }
+                    $State[$k] = $res.State[$k]
+                }
+                if ($res.State.DirectoryCache) {
+                    foreach ($ck in $res.State.DirectoryCache.Keys) {
+                        Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $ck -Value $res.State.DirectoryCache[$ck] -MaxEntries $State.MaxDirectoryCacheEntries -Aliases $State.DirectoryCacheAliases
+                    }
+                }
+                if ($res.State.DirectoryCacheAliases) {
+                    foreach ($alias in $res.State.DirectoryCacheAliases.Keys) {
+                        $State.DirectoryCacheAliases[$alias] = $res.State.DirectoryCacheAliases[$alias]
+                    }
+                }
+            }
+            $res.State = $State
             return $res
         }
     } catch {
@@ -1893,6 +1938,7 @@ function Browse-AndroidFileSystem {
 
         $jobErrors = $null
         if ($res -and $res.PSObject.Properties.Match('JobErrors').Count -gt 0) { $jobErrors = $res.JobErrors }
+        if ($jobErrors) { Write-ErrorMessage -Operation "Background job failed" -Details $jobErrors }
         if (-not $res -or -not $res.Items) {
             Write-ErrorMessage -Operation "Failed to load directory" -Details $jobErrors
             Start-Sleep -Seconds 1
