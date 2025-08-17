@@ -36,6 +36,41 @@ Describe "Sort-BrowseItems" {
         $sortedNames = (Sort-BrowseItems $items) | ForEach-Object { $_.Name }
         $sortedNames | Should -Be @('Banana','Яблоко','ábaco','Éclair')
     }
+
+    It "treats symlinks to directories as directories" {
+        $items = @(
+            [pscustomobject]@{ Name = 'zeta'; Type = 'File' },
+            [pscustomobject]@{ Name = 'alpha'; Type = 'Directory' },
+            [pscustomobject]@{ Name = 'link'; Type = 'Link'; ResolvedType = 'Directory' }
+        )
+
+        $sortedNames = (Sort-BrowseItems $items) | ForEach-Object { $_.Name }
+        $sortedNames | Should -Be @('alpha','link','zeta')
+    }
+
+    It "orders mixed-case and non-Latin names with directories first" {
+        $items = @(
+            [pscustomobject]@{ Name = 'beta'; Type = 'File' },
+            [pscustomobject]@{ Name = 'Alpha'; Type = 'File' },
+            [pscustomobject]@{ Name = 'Яблоко'; Type = 'Directory' },
+            [pscustomobject]@{ Name = 'delta'; Type = 'Directory' },
+            [pscustomobject]@{ Name = 'ábaco'; Type = 'File' },
+            [pscustomobject]@{ Name = 'Γamma'; Type = 'Directory' }
+        )
+
+        $sortedNames = (Sort-BrowseItems $items) | ForEach-Object { $_.Name }
+
+        $dirNames = $items | Where-Object { $_.Type -eq 'Directory' } | ForEach-Object { $_.Name }
+        $dirList = [System.Collections.Generic.List[string]]::new([string[]]$dirNames)
+        $dirList.Sort([StringComparer]::InvariantCultureIgnoreCase)
+
+        $fileNames = $items | Where-Object { $_.Type -ne 'Directory' } | ForEach-Object { $_.Name }
+        $fileList = [System.Collections.Generic.List[string]]::new([string[]]$fileNames)
+        $fileList.Sort([StringComparer]::InvariantCultureIgnoreCase)
+
+        $expected = @($dirList.ToArray() + $fileList.ToArray())
+        $sortedNames | Should -Be $expected
+    }
 }
 
 Describe "Get-AndroidDirectoryContentsJob" {
