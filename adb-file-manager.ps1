@@ -730,8 +730,9 @@ function Show-UIHeader {
     $updateResult = Update-DeviceStatus -State $State
     $State = $updateResult.State
 
-    $shouldShowList = ($ShowDeviceList -or $updateResult.NeedsSelection) -and $updateResult.Devices.Count -gt 0
-    if ($shouldShowList) {
+    $hasMultiple = $updateResult.Devices.Count -gt 1
+    $shouldShowList = $ShowDeviceList -or $hasMultiple
+    if ($shouldShowList -and $updateResult.Devices.Count -gt 0) {
         Write-Host "`nAvailable devices:" -ForegroundColor Cyan
         for ($i = 0; $i -lt $updateResult.Devices.Count; $i++) {
             $info = $updateResult.Devices[$i]
@@ -1470,6 +1471,7 @@ function Pull-FilesFromAndroid {
         [string]$Path,
         [switch]$Move
     )
+    Clear-Host
     $actionVerb = if ($Move) { "MOVE" } else { "PULL" }
     Write-Host "`n📥 $actionVerb FROM ANDROID" -ForegroundColor Magenta
 
@@ -1742,6 +1744,7 @@ function Push-FilesToAndroid {
         [switch]$Move,
         [string]$DestinationPath
     )
+    Clear-Host
     $actionVerb = if ($Move) { "MOVE" } else { "PUSH" }
     Write-Host "`n📤 $actionVerb ITEMS TO ANDROID" -ForegroundColor Magenta
 
@@ -1977,9 +1980,9 @@ function Browse-AndroidFileSystem {
 
         switch ($choice) {
             "q" { Clear-Host; return $State }
-            "c" { $State = New-AndroidFolder -State $State -ParentPath $currentPath; Read-Host "`nPress Enter to continue..." }
-            "p" { $State = Pull-FilesFromAndroid -State $State -Path $currentPath; Read-Host "`nPress Enter to continue..." }
-            "u" { $State = Push-FilesToAndroid -State $State -DestinationPath $currentPath; Read-Host "`nPress Enter to continue..." }
+            "c" { Clear-Host; $State = New-AndroidFolder -State $State -ParentPath $currentPath; Read-Host "`nPress Enter to continue..." }
+            "p" { Clear-Host; $State = Pull-FilesFromAndroid -State $State -Path $currentPath; Read-Host "`nPress Enter to continue..." }
+            "u" { Clear-Host; $State = Push-FilesToAndroid -State $State -DestinationPath $currentPath; Read-Host "`nPress Enter to continue..." }
             "r" {
                 Write-Host "`n🔄 Refreshing directory..." -ForegroundColor Yellow
                 $State = Invalidate-DirectoryCache -State $State -DirectoryPath $currentPath
@@ -2014,6 +2017,7 @@ function Browse-AndroidFileSystem {
                             Clear-Host
                         }
                     } else {
+                        Clear-Host
                         $State = Show-ItemActionMenu -State $State -Item $selectedItem
                         Clear-Host
                     }
@@ -2066,15 +2070,17 @@ function Show-ItemActionMenu {
         Write-Host " 5. Back to browser"
         $action = Read-Host "`n➡️  Enter your choice (1-5)"
         switch ($action) {
-            "1" { $State = Pull-FilesFromAndroid -State $State -Path $Item.FullPath; Read-Host "`nPress Enter to continue..."; break }
-            "2" { $State = Pull-FilesFromAndroid -State $State -Path $Item.FullPath -Move; Read-Host "`nPress Enter to continue..."; break }
+            "1" { Clear-Host; $State = Pull-FilesFromAndroid -State $State -Path $Item.FullPath; Read-Host "`nPress Enter to continue..."; break }
+            "2" { Clear-Host; $State = Pull-FilesFromAndroid -State $State -Path $Item.FullPath -Move; Read-Host "`nPress Enter to continue..."; break }
             "3" {
+                Clear-Host
                 $State = Rename-AndroidItem -State $State -ItemPath $Item.FullPath
                 Read-Host "`nPress Enter to continue..."
                 Clear-Host
                 return $State # Return to browser as item name has changed
             }
             "4" {
+                Clear-Host
                 $State = Remove-AndroidItem -State $State -ItemPath $Item.FullPath
                 Read-Host "`nPress Enter to continue..."
                 Clear-Host
@@ -2254,15 +2260,16 @@ function Show-MainMenu {
         }
 
         switch ($choice) {
-            '1' { $State = Browse-AndroidFileSystem -State $State }
-            '2' { $State = Push-FilesToAndroid -State $State }
-            '3' { $State = Pull-FilesFromAndroid -State $State }
+            '1' { Clear-Host; $State = Browse-AndroidFileSystem -State $State }
+            '2' { Clear-Host; $State = Push-FilesToAndroid -State $State }
+            '3' { Clear-Host; $State = Pull-FilesFromAndroid -State $State }
             'r' {
+                Clear-Host
                 $State = Show-UIHeader -State $State -SubTitle "MAIN MENU" -ShowDeviceList
                 Read-Host "Press Enter to continue"
                 continue
             }
-            'q' { return $State }
+            'q' { Clear-Host; return $State }
             default { Write-ErrorMessage -Operation "Invalid choice"; Start-Sleep -Seconds 1 }
         }
 
