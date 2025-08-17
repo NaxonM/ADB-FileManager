@@ -110,3 +110,31 @@ Describe "Browse-AndroidFileSystem job error handling" {
         Assert-MockCalled Clear-Host -Times 1 -Exactly
     }
 }
+
+Describe "Browse-AndroidFileSystem navigation" {
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager.ps1" }
+
+    It "clears the screen when entering a subdirectory" {
+        $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
+
+        $inputs = @('/start','1','q')
+        $script:idx = 0
+        Mock Read-Host { $res = $inputs[$script:idx]; $script:idx++; return $res }
+
+        Mock Show-UIHeader { param($State,$Title) return $State }
+        Mock Test-AndroidPath { $true }
+        Mock Get-AndroidDirectoryContentsJob {
+            param($State,$Path)
+            if ($Path -eq '/start') {
+                return [pscustomobject]@{ State=$State; Items=@([pscustomobject]@{ Name='sub'; Type='Directory'; FullPath='/start/sub' }) }
+            } else {
+                return [pscustomobject]@{ State=$State; Items=@([pscustomobject]@{ Name='file'; Type='File'; FullPath='/start/sub/file' }) }
+            }
+        }
+
+        Mock Clear-Host {}
+
+        Browse-AndroidFileSystem -State $state | Out-Null
+        Assert-MockCalled Clear-Host -Times 4 -Exactly
+    }
+}
