@@ -114,9 +114,14 @@ Describe "Browse-AndroidFileSystem job error handling" {
         Mock Start-Sleep {}
         Mock Test-AndroidPath { $true }
         $realJob = (Get-Command Get-AndroidDirectoryContentsJob).ScriptBlock
+        $script:thrown = $false
         Mock Get-AndroidDirectoryContentsJob {
             $params = $PSBoundParameters
-            $params['Fetcher'] = { param($s,$p) throw 'invalid path' }
+            $params['Fetcher'] = {
+                param($s,$p)
+                if (-not $script:thrown) { $script:thrown = $true; throw 'invalid path' }
+                else { [pscustomobject]@{ State = $s; Items = @() } }
+            }
             & $realJob @params
         }
         $script:logged = @()

@@ -1033,133 +1033,51 @@ function Get-AndroidDirectoryContents {
     }
     Write-Log "CACHE MISS: Fetching contents for '$canonicalKey' from device (requested as '$cacheKey')." "DEBUG" -SanitizePaths
 
-    # Determine how to batch query metadata for directory contents in one command.
-    if ($null -eq $State.Features.SupportsStatC) {
-        $probe = Invoke-AdbCommand -State $State -Arguments @('shell','stat','-c','%F|%s|%n','/')
-        $State = $probe.State
-        $State.Features.SupportsStatC = $probe.Success
-        if (-not $probe.Success -and -not $State.Features.WarnedStatFallback) {
-            Write-Log "Device does not support 'stat -c'; falling back to parsing 'ls -ld' output." "WARN"
-            $State.Features.WarnedStatFallback = $true
-        }
-    }
-    if ($null -eq $State.Features.SupportsFind) {
-        $probeFind = Invoke-AdbCommand -State $State -Arguments @('shell','find','/','-maxdepth','0')
-        $State = $probeFind.State
-        $State.Features.SupportsFind = $probeFind.Success
-        if (-not $probeFind.Success) {
-            Write-Log "Device does not support 'find'; falling back to slower 'ls/stat' loop." "WARN"
-        }
+    $lsArgs   = @('shell','ls','-lAp','--time-style=+%s', "'$listPath'")
+    $listRes  = Invoke-AdbCommand -State $State -Arguments $lsArgs
+    $State    = $listRes.State
+    if (-not $listRes.Success) {
+        Write-Host ""
+        Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $listRes.Output
+        return [PSCustomObject]@{ State = $State; Items = @() }
     }
 
-    $chunkSize = 50
-    $lines = @()
-    $lineFormat = ''
-    if ($State.Features.SupportsFind) {
-        $findCmd = "find '$listPath' -maxdepth 1 -mindepth 1"
-        if ($State.Features.SupportsStatC) {
-            $findCmd += " -exec stat -c '%F|%s|%n' {} +"
-        } else {
-            $findCmd += " -exec ls -ld {} +"
-        }
-        $cmdArgs = @('shell','timeout','15s','sh','-c', "$findCmd 2>/dev/null")
-        $result = Invoke-AdbCommand -State $State -Arguments $cmdArgs
-        $State = $result.State
-        $lines = $result.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        if (-not $result.Success -or $lines.Count -eq 0) {
-            Write-Log "Disabling 'find' due to failure or timeout; falling back to 'ls -al'." "WARN"
-            $State.Features.SupportsFind = $false
-            $lines = @()
-        } else {
-            $lineFormat = if ($State.Features.SupportsStatC) { 'stat' } else { 'ls' }
-        }
-    }
-    if (-not $State.Features.SupportsFind) {
-        $listRes = Invoke-AdbCommand -State $State -Arguments @('shell','ls','-al', "'$listPath'")
-        $State = $listRes.State
-        if (-not $listRes.Success) {
-            Write-Host ""
-            Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $listRes.Output
-            return [PSCustomObject]@{ State = $State; Items = @() }
-        }
-        $lines = $listRes.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^total' }
-        $lineFormat = 'ls'
-    }
+    $lines = $listRes.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^total' }
+    $itemsMap = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
 
-    $items = @()
     foreach ($line in $lines) {
-        if ($lineFormat -eq 'stat') {
-            if ($line -match '^(?<type>.+)\|(?<size>\d+)\|(?<path>.+)$') {
-                $path = $Matches.path.Trim()
-                $name = $path.Substring($path.LastIndexOf('/') + 1)
-                $aliasPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
-                if (-not (Test-AndroidPath $aliasPath)) { continue }
-                $type = switch -regex ($Matches.type) {
-                    '^directory$'    { 'Directory' }
-                    '^regular file$' { 'File' }
-                    '^symbolic link.*$' { 'Link' }
-                    default { 'Other' }
-                }
-                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
-                $items += [PSCustomObject]@{
-                    Name        = $name
-                    Type        = $type
-                    Permissions = ''
-                    FullPath    = $aliasPath
-                    Size        = $size
-                }
-                $State.DirectoryCacheAliases[$aliasPath] = $path
-                $State.DirectoryCacheAliases[$path] = $path
-            }
-        } else {
-            if ($line -match '^(?<perm>.).{9}\s+\d+\s+\S+(?:\s+\S+)?\s+(?<size>\d+)\s+\S+\s+\S+\s+\S+\s+(?<rest>.+)$') {
-                $path = ($Matches.rest -split '\s->\s')[0].Trim()
-                $name = $path.Substring($path.LastIndexOf('/') + 1)
-                if ($name -in '.', '..') { continue }
-                $aliasPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$name" } else { "$cacheKey/$name" }
-                if (-not (Test-AndroidPath $aliasPath)) { continue }
-                $type = switch ($Matches.perm) {
-                    'd' { 'Directory' }
-                    'l' { 'Link' }
-                    '-' { 'File' }
-                    default { 'Other' }
-                }
-                $size = if ($type -eq 'File') { [long]$Matches.size } else { 0L }
-                $items += [PSCustomObject]@{
-                    Name        = $name
-                    Type        = $type
-                    Permissions = ''
-                    FullPath    = $aliasPath
-                    Size        = $size
-                }
-                $State.DirectoryCacheAliases[$aliasPath] = $path
-                $State.DirectoryCacheAliases[$path] = $path
+        $parts = $line -split '\s+',7
+        if ($parts.Length -lt 7) { continue }
+        $perm      = $parts[0]
+        $sizeField = $parts[4]
+        $nameField = $parts[6]
+        $nameOnly  = ($nameField -split '\s->\s')[0]
+        if ($nameOnly -in '.', '..') { continue }
+
+        $type = switch ($perm[0]) {
+            'd' { 'Directory' }
+            'l' { 'Link' }
+            default {
+                if ($nameOnly.EndsWith('/')) { 'Directory' } else { 'File' }
             }
         }
+        if ($nameOnly.EndsWith('/')) { $nameOnly = $nameOnly.TrimEnd('/') }
+        $size = if ($type -eq 'File') { [long]$sizeField } else { 0L }
+
+        $aliasPath = if ($cacheKey.EndsWith('/')) { "$cacheKey$nameOnly" } else { "$cacheKey/$nameOnly" }
+        if (-not (Test-AndroidPath $aliasPath)) { continue }
+
+        $itemsMap[$aliasPath] = [PSCustomObject]@{
+            Name        = $nameOnly
+            Type        = $type
+            Permissions = ''
+            FullPath    = $aliasPath
+            Size        = $size
+        }
+        $State.DirectoryCacheAliases[$aliasPath] = $aliasPath
     }
 
-    # Resolve any items not yet confirmed as directories using additional checks
-    $unverifiedItems = $items | Where-Object { $_.Type -notin 'Directory','Link','File' }
-    if ($unverifiedItems.Count -gt 0) {
-        $unverifiedMap = @{}
-        foreach ($item in $unverifiedItems) { $unverifiedMap[$item.FullPath] = $item }
-        foreach ($chunk in Split-IntoChunks -Items $unverifiedMap.Keys -ChunkSize $chunkSize) {
-            $lsArgs  = @('shell','ls','-p','-d') + ($chunk | ForEach-Object { "'$_'" })
-            $lsProbe = Invoke-AdbCommand -State $State -Arguments $lsArgs
-            $State   = $lsProbe.State
-            if ($lsProbe.Success) {
-                $lines = $lsProbe.Output -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-                foreach ($line in $lines) {
-                    $pathOut = $line.Trim()
-                    $isDir = $pathOut.EndsWith('/')
-                    $resolved = if ($isDir) { $pathOut.TrimEnd('/') } else { $pathOut }
-                    if ($unverifiedMap.ContainsKey($resolved)) {
-                        $unverifiedMap[$resolved].Type = if ($isDir) { 'Directory' } else { 'File' }
-                    }
-                }
-            }
-        }
-    }
+    $items = @($itemsMap.Values)
 
     # Store the fresh result in the cache using the canonical path as the key
     Add-ToCacheWithLimit -Cache $State.DirectoryCache -Key $canonicalKey -Value $items -MaxEntries $State.MaxDirectoryCacheEntries -Aliases $State.DirectoryCacheAliases
