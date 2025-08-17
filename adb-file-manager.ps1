@@ -1611,6 +1611,7 @@ function Execute-PushTransfer {
                 }
                 Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $currentSize -TotalValue $itemTotalSize -StartTime $itemStartTime -ShowCancelMessage
                 Start-Sleep -Milliseconds $UpdateInterval
+                Clear-ProgressLine
             }
             if ($cancelled) {
                 $proc.WaitForExit() | Out-Null
@@ -1649,6 +1650,7 @@ function Execute-PushTransfer {
                 }
                 $spinIndex++
                 Start-Sleep -Milliseconds $UpdateInterval
+                Clear-ProgressLine
             }
             if ($cancelled) {
                 $proc.WaitForExit() | Out-Null
@@ -1666,13 +1668,13 @@ function Execute-PushTransfer {
         $stdout = Get-Content -LiteralPath $stdoutFile -Raw -ErrorAction SilentlyContinue
         $stderr = Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $stdoutFile,$stderrFile -ErrorAction SilentlyContinue
-        $combinedOutput = ($stdout,$stderr | Where-Object { $_ }) -join "`n"
-        $success = ($proc.ExitCode -eq 0 -and $combinedOutput -notmatch 'error:')
+        $success = ($proc.ExitCode -eq 0)
 
         if ($success) {
             $successCount++
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
-            Write-Host $combinedOutput -ForegroundColor Gray
+            if ($stdout) { Write-Host $stdout.TrimEnd() -ForegroundColor Gray }
+            if ($stderr) { Write-Host $stderr.TrimEnd() -ForegroundColor Yellow }
 
             $State = Invalidate-DirectoryCache -State $State -DirectoryPath $Destination
 
@@ -1717,6 +1719,7 @@ function Execute-PushTransfer {
             }
         } else {
             $failureCount++
+            $combinedOutput = ($stdout,$stderr | Where-Object { $_ }) -join "`n"
             Write-ErrorMessage -Operation "FAILED to push" -Item $itemInfo.Name -Details $combinedOutput
         }
 
@@ -1730,7 +1733,7 @@ function Execute-PushTransfer {
 
 function Show-PushSummary {
     param([int]$SuccessCount, [int]$FailureCount)
-    Write-Host "`n📊 TRANSFER SUMMARY: ✅ $SuccessCount Successful, ❌ $FailureCount Failed" -ForegroundColor Cyan
+    Write-Host "`n📊 TRANSFER SUMMARY (exit code 0 = success): ✅ $SuccessCount Successful, ❌ $FailureCount Failed" -ForegroundColor Cyan
 }
  
 function Push-FilesToAndroid {
