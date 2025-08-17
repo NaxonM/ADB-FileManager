@@ -1702,8 +1702,13 @@ function Sort-BrowseItems {
     $list = [System.Collections.Generic.List[psobject]]::new([psobject[]]$Items)
     $comparison = [System.Comparison[psobject]]{
         param($a, $b)
-        $aRank = if ($a.Type -eq 'Directory') { 0 } else { 1 }
-        $bRank = if ($b.Type -eq 'Directory') { 0 } else { 1 }
+
+        $aType = if ($a.PSObject.Properties['ResolvedType']) { $a.ResolvedType } else { $a.Type }
+        $bType = if ($b.PSObject.Properties['ResolvedType']) { $b.ResolvedType } else { $b.Type }
+
+        $aRank = if ($aType -eq 'Directory') { 0 } else { 1 }
+        $bRank = if ($bType -eq 'Directory') { 0 } else { 1 }
+
         $rankCompare = $aRank.CompareTo($bRank)
         if ($rankCompare -ne 0) { return $rankCompare }
         return [StringComparer]::InvariantCultureIgnoreCase.Compare($a.Name, $b.Name)
@@ -1890,6 +1895,16 @@ function Browse-AndroidFileSystem {
         # Cast the result to an array to prevent errors when a directory has only one item.
         $res.Items = @($res.Items)
         $State = $res.State
+
+        # Resolve link targets so Sort-BrowseItems sees accurate types.
+        foreach ($item in $res.Items) {
+            if ($item.Type -eq 'Link') {
+                $typeCheck = Test-AndroidItemIsDirectory -State $State -Path $item.FullPath
+                $State = $typeCheck.State
+                $resolved = if ($typeCheck.Success -and $typeCheck.IsDirectory) { 'Directory' } else { 'File' }
+                $item | Add-Member -NotePropertyName ResolvedType -NotePropertyValue $resolved -Force
+            }
+        }
 
         # Sort directories before files using a culture-invariant, case-insensitive comparer
         $items = Sort-BrowseItems $res.Items
