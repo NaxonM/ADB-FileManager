@@ -189,7 +189,7 @@ function Invoke-AdbCommand {
         [string[]]$Arguments,
         [switch]$HideOutput,
         [switch]$NoSerial,
-        [int]$TimeoutMs = $State.Config.DefaultTimeoutMs,
+        [int]$TimeoutMs = $(if ($State.Config -and $State.Config.DefaultTimeoutMs -gt 0) { $State.Config.DefaultTimeoutMs } else { 120000 }),
         [switch]$RawOutput,
         [bool]$MergeStdErrOnSuccess = $true
     )
@@ -1843,7 +1843,16 @@ function Get-AndroidDirectoryContentsJob {
             $jobErrorText = ($jobErrors -join " `n").Trim()
             if ($jobErrorText) { Write-Log "Background job error: $jobErrorText" "ERROR" }
             Remove-Job $job -Force | Out-Null
-            if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+
+            if (-not $res -or $res.PSObject.Properties.Match('State').Count -eq 0 -or $null -eq $res.Items) {
+                Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
+                $res = & $Fetcher $State $Path
+                if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+                $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue ($jobErrorText ? $jobErrorText : 'Invalid job result')
+                $res.State = $State
+                return $res
+            }
+
             $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobErrorText
             if ($res.State) {
                 foreach ($k in $res.State.Keys) {
@@ -1892,7 +1901,16 @@ function Get-AndroidDirectoryContentsJob {
             }
             $res = $ps.EndInvoke($handle)
             $ps.Dispose()
-            if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+
+            if (-not $res -or $res.PSObject.Properties.Match('State').Count -eq 0 -or $null -eq $res.Items) {
+                Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
+                $res = & $Fetcher $State $Path
+                if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
+                $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue 'Invalid job result'
+                $res.State = $State
+                return $res
+            }
+
             $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue ""
             if ($res.State) {
                 foreach ($k in $res.State.Keys) {
