@@ -1003,7 +1003,8 @@ function Get-LocalItemSize {
 function Get-AndroidDirectoryContents {
     param(
         [hashtable]$State,
-        [string]$Path
+        [string]$Path,
+        [int]$TimeoutSeconds = 30
     )
     # Normalize path for cache key consistency
     $cacheKey = ConvertTo-AndroidPath $Path
@@ -1054,8 +1055,14 @@ function Get-AndroidDirectoryContents {
         $lsArgs += '--time-style=+%s'
     }
     $lsArgs += "'$listPath'"
-    $listRes  = Invoke-AdbCommand -State $State -Arguments $lsArgs
+    $listRes  = Invoke-AdbCommand -State $State -Arguments $lsArgs -TimeoutMs ($TimeoutSeconds * 1000)
     $State    = $listRes.State
+    if (-not $listRes.Success -and $listRes.Output -match 'timed out') {
+        Write-Log "Directory listing timed out; retrying with basic ls" "WARN"
+        $simpleArgs = @('shell','ls','-l',"'$listPath'")
+        $listRes = Invoke-AdbCommand -State $State -Arguments $simpleArgs -TimeoutMs ($TimeoutSeconds * 1000)
+        $State   = $listRes.State
+    }
     if (-not $listRes.Success) {
         Write-Host ""
         Write-ErrorMessage -Operation "Failed to list directory" -Item $Path -Details $listRes.Output
@@ -1766,7 +1773,7 @@ function Get-AndroidDirectoryContentsJob {
     param(
         [hashtable]$State,
         [string]$Path,
-        [scriptblock]$Fetcher = { param($s,$p) Get-AndroidDirectoryContents -State $s -Path $p },
+        [scriptblock]$Fetcher = { param($s,$p,$t) Get-AndroidDirectoryContents -State $s -Path $p -TimeoutSeconds $t },
         [int]$TimeoutSeconds = 30,
         [switch]$ShowSpinner
     )
@@ -1786,7 +1793,7 @@ function Get-AndroidDirectoryContentsJob {
 
     try {
         if ($script:IsPSCore -and (Get-Command -Name Start-ThreadJob -ErrorAction SilentlyContinue)) {
-            $job = Start-ThreadJob -ScriptBlock { param($s,$p,$f) & $f $s $p } -ArgumentList $stateClone,$Path,$Fetcher
+            $job = Start-ThreadJob -ScriptBlock { param($s,$p,$f,$t) & $f $s $p $t } -ArgumentList $stateClone,$Path,$Fetcher,$TimeoutSeconds
             $spinner = @('|','/','-','\\')
             $idx = 0
             $timeout = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -1814,7 +1821,7 @@ function Get-AndroidDirectoryContentsJob {
 
             if (-not $res -or $res.PSObject.Properties.Match('State').Count -eq 0 -or $null -eq $res.Items) {
                 Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
-                $res = & $Fetcher $State $Path
+                $res = & $Fetcher $State $Path $TimeoutSeconds
                 if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
                 $jobNote = if ($jobErrorText) { $jobErrorText } else { 'Invalid job result' }
                 $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobNote
@@ -1846,10 +1853,11 @@ function Get-AndroidDirectoryContentsJob {
             $rs = [runspacefactory]::CreateRunspace()
             $rs.Open()
             $ps.Runspace = $rs
-            $ps.AddScript({ param($s,$p,$f) & $f $s $p }) | Out-Null
+            $ps.AddScript({ param($s,$p,$f,$t) & $f $s $p $t }) | Out-Null
             $ps.AddArgument($stateClone)
             $ps.AddArgument($Path)
             $ps.AddArgument($Fetcher)
+            $ps.AddArgument($TimeoutSeconds)
             $handle = $ps.BeginInvoke()
             $spinner = @('|','/','-','\\')
             $idx = 0
@@ -1873,7 +1881,7 @@ function Get-AndroidDirectoryContentsJob {
 
             if (-not $res -or $res.PSObject.Properties.Match('State').Count -eq 0 -or $null -eq $res.Items) {
                 Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
-                $res = & $Fetcher $State $Path
+                $res = & $Fetcher $State $Path $TimeoutSeconds
                 if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
                 $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue 'Invalid job result'
                 $res.State = $State
@@ -1903,7 +1911,7 @@ function Get-AndroidDirectoryContentsJob {
     } catch {
         $err = $_.ToString()
         Write-Log "Background job exception: $err" "ERROR"
-        $res = & $Fetcher $State $Path
+        $res = & $Fetcher $State $Path $TimeoutSeconds
         if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
         $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $err
         return $res
