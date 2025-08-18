@@ -1057,6 +1057,13 @@ function Get-AndroidDirectoryContents {
     $lsArgs += "'$listPath'"
     $listRes  = Invoke-AdbCommand -State $State -Arguments $lsArgs -TimeoutMs ($TimeoutSeconds * 1000)
     $State    = $listRes.State
+    if (-not $listRes.Success -and $State.Features.SupportsLsTimeStyle -and $listRes.Output -match 'unknown option') {
+        Write-Log "ls --time-style unsupported; retrying without flag" "WARN"
+        $State.Features.SupportsLsTimeStyle = $false
+        $lsArgs = @('shell','ls','-lAp',"'$listPath'")
+        $listRes = Invoke-AdbCommand -State $State -Arguments $lsArgs -TimeoutMs ($TimeoutSeconds * 1000)
+        $State    = $listRes.State
+    }
     if (-not $listRes.Success -and $listRes.Output -match 'timed out') {
         Write-Log "Directory listing timed out; retrying with basic ls" "WARN"
         $simpleArgs = @('shell','ls','-l',"'$listPath'")
