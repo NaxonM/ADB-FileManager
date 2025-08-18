@@ -1948,13 +1948,16 @@ function Browse-AndroidFileSystem {
                     $selectedIndex = [int]$choice - 1
                     $selectedItem = $items[$selectedIndex]
                     if ($selectedItem.Type -in "Directory", "Link") {
-                        if (Test-AndroidPath $selectedItem.FullPath) {
+                        Clear-Host
+                        $loadingMsg = "Loading..."
+                        Write-Host -NoNewline $loadingMsg -ForegroundColor Yellow
+                        $pathValid = Test-AndroidPath $selectedItem.FullPath
+                        Write-Host "`r" + (' ' * $loadingMsg.Length) + "`r" -NoNewline
+                        if ($pathValid) {
                             $currentPath = $selectedItem.FullPath
-                            Clear-Host
                         } else {
                             Write-ErrorMessage -Operation "Invalid path"
                             Start-Sleep -Seconds 1
-                            Clear-Host
                         }
                     } else {
                         Clear-Host
