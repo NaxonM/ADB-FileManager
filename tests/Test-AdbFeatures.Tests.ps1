@@ -69,4 +69,33 @@ Describe "Test-AdbFeatures" {
         $res = Get-AndroidDirectoryContents -State $state -Path '/data'
         Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[0] -eq 'shell' -and $Arguments[1] -eq 'ls' -and -not ($Arguments -contains '--time-style=+%s') } -Times 1
     }
+
+    It "disables ls time-style after runtime unknown option error" {
+        $state = @{
+            DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
+            DirectoryCacheAliases = @{ '/data' = '/data' }
+            Features = @{ SupportsLsTimeStyle = $true }
+            Config = @{ VerboseLists = $false }
+            DeviceStatus = @{ IsConnected = $true }
+            MaxDirectoryCacheEntries = 100
+        }
+        $calls = 0
+        Mock Invoke-AdbCommand {
+            param($State,$Arguments,$TimeoutMs,$RawOutput,$SuppressErrors)
+            if ($Arguments[0] -eq 'shell' -and $Arguments[1] -eq 'ls') {
+                $calls++
+                if ($calls -eq 1) {
+                    return [pscustomobject]@{ Success = $false; Output = 'ls: unknown option --time-style'; State = $State }
+                } else {
+                    return [pscustomobject]@{ Success = $true; Output = 'drwxr-xr-x 2 root root 0 Jan 1 2024 subdir/'; State = $State }
+                }
+            }
+            return [pscustomobject]@{ Success = $true; Output = ''; State = $State }
+        }
+
+        $res = Get-AndroidDirectoryContents -State $state -Path '/data'
+        $res.State.Features.SupportsLsTimeStyle | Should -BeFalse
+        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[0] -eq 'shell' -and $Arguments[1] -eq 'ls' -and $Arguments -contains '--time-style=+%s' } -Times 1
+        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[0] -eq 'shell' -and $Arguments[1] -eq 'ls' -and -not ($Arguments -contains '--time-style=+%s') } -Times 1
+    }
 }
