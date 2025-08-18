@@ -97,6 +97,7 @@ $script:State = @{
         Checked            = $false
         SupportsStatC      = $null
         SupportsFind       = $null
+        SupportsLsTimeStyle = $null
         WarnedStatFallback = $false
     }
     Config = @{
@@ -272,6 +273,7 @@ function Invoke-AdbCommand {
                 Write-Log "Directory cache cleared due to device loss." "WARN"
                 $State.Features.Checked = $false
                 $State.Features.SupportsDuSb = $false
+                $State.Features.SupportsLsTimeStyle = $null
             }
         }
         if ($HideOutput) { return [PSCustomObject]@{ Success = $success; StdOut = ''; StdErr = ''; ExitCode = $exitCode; State = $State } }
@@ -297,6 +299,7 @@ function Invoke-AdbCommand {
             Write-Log "Directory cache cleared due to device loss." "WARN"
             $State.Features.Checked = $false
             $State.Features.SupportsDuSb = $false
+            $State.Features.SupportsLsTimeStyle = $null
         }
     }
 
@@ -357,6 +360,12 @@ function Test-AdbFeatures {
         } else {
             $State.Features.SupportsDuSb = $false
             Write-Host "⚠️  Warning: Your device does not support 'du -sb'. Directory size calculations may be slower or unavailable." -ForegroundColor Yellow
+        }
+        $lsProbe = Invoke-AdbCommand -State $State -Arguments @('shell','ls','--time-style=+%s','/')
+        $State = $lsProbe.State
+        $State.Features.SupportsLsTimeStyle = $lsProbe.Success
+        if (-not $lsProbe.Success) {
+            Write-Log "Device does not support 'ls --time-style=+%s'; falling back to default ls output." "WARN"
         }
         $State.Features.Checked = $true
     }
@@ -451,6 +460,7 @@ function Update-DeviceStatus {
         Write-Log "No device connected." "INFO"
         $State.Features.Checked = $false
         $State.Features.SupportsDuSb = $false
+        $State.Features.SupportsLsTimeStyle = $null
     }
 
     # Update the timestamp after a full check.
@@ -1022,7 +1032,11 @@ function Get-AndroidDirectoryContents {
     }
     Write-Log "CACHE MISS: Fetching contents for '$canonicalKey' from device (requested as '$cacheKey')." "DEBUG" -SanitizePaths
 
-    $lsArgs   = @('shell','ls','-lAp','--time-style=+%s', "'$listPath'")
+    $lsArgs = @('shell','ls','-lAp')
+    if ($State.Features.SupportsLsTimeStyle) {
+        $lsArgs += '--time-style=+%s'
+    }
+    $lsArgs += "'$listPath'"
     $listRes  = Invoke-AdbCommand -State $State -Arguments $lsArgs
     $State    = $listRes.State
     if (-not $listRes.Success) {
@@ -1035,11 +1049,35 @@ function Get-AndroidDirectoryContents {
     $itemsMap = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
 
     foreach ($line in $lines) {
-        $parts = $line -split '\s+',7
-        if ($parts.Length -lt 7) { continue }
-        $perm      = $parts[0]
-        $sizeField = $parts[4]
-        $nameField = $parts[6]
+        if ($State.Features.SupportsLsTimeStyle) {
+            $parts = $line -split '\s+',7
+            if ($parts.Length -lt 7) { continue }
+            $perm       = $parts[0]
+            $sizeField  = $parts[4]
+            $timestampField = $parts[5]
+            $nameField  = $parts[6]
+            $timestamp  = try { [long]$timestampField } catch { 0 }
+        } else {
+            $parts = $line -split '\s+',9
+            if ($parts.Length -lt 9) { continue }
+            $perm      = $parts[0]
+            $sizeField = $parts[4]
+            $month     = $parts[5]
+            $day       = $parts[6]
+            $yearOrTime = $parts[7]
+            $nameField = $parts[8]
+            try {
+                if ($yearOrTime -match '^[0-9]{4}$') {
+                    $dt = [datetime]::ParseExact("$month $day $yearOrTime", 'MMM d yyyy', [System.Globalization.CultureInfo]::InvariantCulture)
+                } else {
+                    $year = (Get-Date).Year
+                    $dt = [datetime]::ParseExact("$month $day $year $yearOrTime", 'MMM d yyyy HH:mm', [System.Globalization.CultureInfo]::InvariantCulture)
+                }
+                $timestamp = [long][math]::Floor(($dt.ToUniversalTime() - [datetime]::UnixEpoch).TotalSeconds)
+            } catch {
+                $timestamp = 0
+            }
+        }
         $nameOnly  = ($nameField -split '\s->\s')[0]
         if ($nameOnly -in '.', '..') { continue }
 
@@ -1062,6 +1100,7 @@ function Get-AndroidDirectoryContents {
             Permissions = ''
             FullPath    = $aliasPath
             Size        = $size
+            Timestamp   = $timestamp
         }
         $State.DirectoryCacheAliases[$aliasPath] = $aliasPath
     }
