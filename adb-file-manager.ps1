@@ -1810,7 +1810,8 @@ function Get-AndroidDirectoryContentsJob {
             if ($job.State -eq 'Running') {
                 Stop-Job $job | Out-Null
                 Remove-Job $job | Out-Null
-                throw 'Timeout'
+                Write-Log "Directory listing for $Path timed out after $TimeoutSeconds seconds" "ERROR"
+                return [pscustomobject]@{ State = $State; Items = $null; JobErrors = 'Timeout'; FailureReason = 'Timeout' }
             }
             Wait-Job $job | Out-Null
             $res = Receive-Job $job -ErrorAction SilentlyContinue
@@ -1820,13 +1821,9 @@ function Get-AndroidDirectoryContentsJob {
             Remove-Job $job -Force | Out-Null
 
             if (-not $res -or $res.PSObject.Properties.Match('State').Count -eq 0 -or $null -eq $res.Items) {
-                Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
-                $res = & $Fetcher $State $Path $TimeoutSeconds
-                if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
                 $jobNote = if ($jobErrorText) { $jobErrorText } else { 'Invalid job result' }
-                $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobNote
-                $res.State = $State
-                return $res
+                Write-Log "Invalid background job result: $jobNote" "ERROR"
+                return [pscustomobject]@{ State = $State; Items = $null; JobErrors = $jobNote; FailureReason = 'NoResult' }
             }
 
             $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobErrorText
@@ -1874,18 +1871,15 @@ function Get-AndroidDirectoryContentsJob {
             }
             if (-not $handle.IsCompleted) {
                 $ps.Stop()
-                throw 'Timeout'
+                Write-Log "Directory listing for $Path timed out after $TimeoutSeconds seconds" "ERROR"
+                return [pscustomobject]@{ State = $State; Items = $null; JobErrors = 'Timeout'; FailureReason = 'Timeout' }
             }
             $res = $ps.EndInvoke($handle)
             $ps.Dispose()
 
             if (-not $res -or $res.PSObject.Properties.Match('State').Count -eq 0 -or $null -eq $res.Items) {
-                Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
-                $res = & $Fetcher $State $Path $TimeoutSeconds
-                if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
-                $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue 'Invalid job result'
-                $res.State = $State
-                return $res
+                Write-Log "Invalid background job result: Invalid job result" "ERROR"
+                return [pscustomobject]@{ State = $State; Items = $null; JobErrors = 'Invalid job result'; FailureReason = 'NoResult' }
             }
 
             $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue ""
@@ -1911,10 +1905,7 @@ function Get-AndroidDirectoryContentsJob {
     } catch {
         $err = $_.ToString()
         Write-Log "Background job exception: $err" "ERROR"
-        $res = & $Fetcher $State $Path $TimeoutSeconds
-        if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
-        $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $err
-        return $res
+        return [pscustomobject]@{ State = $State; Items = $null; JobErrors = $err; FailureReason = 'Exception' }
     }
 }
 
@@ -1940,6 +1931,12 @@ function Browse-AndroidFileSystem {
         $jobErrors = $null
         if ($res -and $res.PSObject.Properties.Match('JobErrors').Count -gt 0) { $jobErrors = $res.JobErrors }
         if ($jobErrors) { Write-ErrorMessage -Operation "Background job failed" -Details $jobErrors }
+        if ($res -and $res.PSObject.Properties.Match('FailureReason').Count -gt 0) {
+            $msg = if ($res.FailureReason -eq 'Timeout') { 'Timed out listing directory' } else { 'Failed to load directory' }
+            Write-ErrorMessage -Operation $msg -Details $jobErrors
+            Start-Sleep -Seconds 1
+            return $State
+        }
         if (-not $res -or -not $res.Items) {
             Write-ErrorMessage -Operation "Failed to load directory" -Details $jobErrors
             Start-Sleep -Seconds 1
