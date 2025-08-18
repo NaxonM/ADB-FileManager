@@ -109,6 +109,7 @@ $script:State = @{
         EnableJsonLog                = $JsonLog.IsPresent
         WhatIf                       = $WhatIf.IsPresent
     }
+    UIHeaderShowedList = $false
 }
 
 # --- Core ADB and Logging Functions ---
@@ -741,7 +742,7 @@ function Show-UIHeader {
     Write-Host "║$blank║" -ForegroundColor Cyan
     Write-Host "╚$border╝" -ForegroundColor Cyan
 
-    $State.UIHeaderShowedList = $false
+    if (-not $State.ContainsKey('UIHeaderShowedList')) { $State.UIHeaderShowedList = $false } else { $State.UIHeaderShowedList = $false }
     $updateResult = Update-DeviceStatus -State $State
     $State = $updateResult.State
 
