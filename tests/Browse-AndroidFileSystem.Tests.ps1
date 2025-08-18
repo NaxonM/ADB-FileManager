@@ -81,7 +81,7 @@ Describe "Get-AndroidDirectoryContentsJob" {
         $real = (Get-Command Start-ThreadJob).ScriptBlock
         Mock Start-ThreadJob { & $real @PSBoundParameters } -Verifiable
         $fetcher = {
-            param($s,$p)
+            param($s,$p,$t)
             return [pscustomobject]@{ State = $s; Items = 1..200 | ForEach-Object { [pscustomobject]@{ Name = "f$_"; Type = 'File' } } }
         }
         $res = Get-AndroidDirectoryContentsJob -State $state -Path '/big' -Fetcher $fetcher -ShowSpinner:$false
@@ -93,7 +93,7 @@ Describe "Get-AndroidDirectoryContentsJob" {
         $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
         $global:syncCalled = $false
         $fetcher = {
-            param($s,$p)
+            param($s,$p,$t)
             $global:syncCalled = $true
             return [pscustomobject]@{ State = $s; Items = @('a') }
         }
@@ -107,7 +107,7 @@ Describe "Get-AndroidDirectoryContentsJob" {
         $state = @{ DirectoryCache = @{}; DirectoryCacheAliases = @{}; Features = @{}; Config = @{} }
         $script:syncCalls = 0
         $fetcher = {
-            param($s,$p)
+            param($s,$p,$t)
             $script:syncCalls++
             return [pscustomobject]@{ State = $s; Items = @([pscustomobject]@{ Name = 'file'; Type = 'File'; FullPath = '/big/file' }) }
         }
@@ -130,7 +130,7 @@ Describe "Get-AndroidDirectoryContentsJob" {
         }
         $state.DirectoryCache['/cached'] = @([pscustomobject]@{ Name = 'old'; Type = 'File'; FullPath = '/cached/old'; Size = 0 })
         $state.DirectoryCacheAliases['/cached'] = '/cached'
-        $fetcher = { param($s,$p) Get-AndroidDirectoryContents -State $s -Path $p }
+        $fetcher = { param($s,$p,$t) Get-AndroidDirectoryContents -State $s -Path $p -TimeoutSeconds $t }
         $real = (Get-Command Start-ThreadJob).ScriptBlock
         Mock Start-ThreadJob { & $real @PSBoundParameters }
         $res = Get-AndroidDirectoryContentsJob -State $state -Path '/cached' -Fetcher $fetcher -ShowSpinner:$false
@@ -151,9 +151,10 @@ Describe "Browse-AndroidFileSystem job error handling" {
         $realJob = (Get-Command Get-AndroidDirectoryContentsJob).ScriptBlock
         $script:thrown = $false
         Mock Get-AndroidDirectoryContentsJob {
+            param($State,$Path,$Fetcher,$TimeoutSeconds,$ShowSpinner)
             $params = $PSBoundParameters
             $params['Fetcher'] = {
-                param($s,$p)
+                param($s,$p,$t)
                 if (-not $script:thrown) { $script:thrown = $true; throw 'invalid path' }
                 else { [pscustomobject]@{ State = $s; Items = @() } }
             }
@@ -181,7 +182,7 @@ Describe "Browse-AndroidFileSystem navigation" {
         Mock Show-UIHeader { param($State,$Title) return $State }
         Mock Test-AndroidPath { $true }
         Mock Get-AndroidDirectoryContentsJob {
-            param($State,$Path)
+            param($State,$Path,$Fetcher,$TimeoutSeconds,$ShowSpinner)
             if ($Path -eq '/start') {
                 return [pscustomobject]@{ State=$State; Items=@([pscustomobject]@{ Name='sub'; Type='Directory'; FullPath='/start/sub' }) }
             } else {
