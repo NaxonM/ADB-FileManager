@@ -192,7 +192,8 @@ function Invoke-AdbCommand {
         [switch]$NoSerial,
         [int]$TimeoutMs = $(if ($State.Config -and $State.Config.DefaultTimeoutMs -gt 0) { $State.Config.DefaultTimeoutMs } else { 120000 }),
         [switch]$RawOutput,
-        [bool]$MergeStdErrOnSuccess = $true
+        [bool]$MergeStdErrOnSuccess = $true,
+        [switch]$SuppressErrors
     )
     $argList = @()
     if ($State.DeviceStatus.SerialNumber -and -not $NoSerial) {
@@ -237,7 +238,11 @@ function Invoke-AdbCommand {
         $process = [System.Diagnostics.Process]::Start($psi)
 
         if (-not $process.WaitForExit($TimeoutMs)) {
-            Write-Log "ADB command timed out after $TimeoutMs ms. Killing process." "ERROR"
+            if ($SuppressErrors) {
+                Write-Log "ADB command timed out after $TimeoutMs ms. Killing process." "DEBUG"
+            } else {
+                Write-Log "ADB command timed out after $TimeoutMs ms. Killing process." "ERROR"
+            }
             try { $process.Kill() } catch { }
             $process.WaitForExit()
             $stdout = ''
@@ -262,7 +267,9 @@ function Invoke-AdbCommand {
             $stderr = ''
         }
         if (-not $success) {
-            Write-Log "ADB command failed with exit code $exitCode. Error: $stderr" "ERROR" -SanitizePaths
+            if (-not $SuppressErrors) {
+                Write-Log "ADB command failed with exit code $exitCode. Error: $stderr" "ERROR" -SanitizePaths
+            }
             if ($stderr -match "device not found|device offline|no devices/emulators found") {
                 Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
                 $State.DeviceStatus.IsConnected = $false
@@ -284,7 +291,9 @@ function Invoke-AdbCommand {
     $output = if ($success -and $MergeStdErrOnSuccess) { ($stdout, $stderr | Where-Object { $_ }) -join "`n" } else { if ($success) { $stdout } else { $stderr } }
 
     if (-not $success) {
-        Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR" -SanitizePaths
+        if (-not $SuppressErrors) {
+            Write-Log "ADB command failed with exit code $exitCode. Error: $output" "ERROR" -SanitizePaths
+        }
         # Smart Status Check: If a command fails, check if it's due to a disconnection.
         # This makes the script instantly aware of a disconnected device without constant polling.
         if ($output -match "device not found|device offline|no devices/emulators found") {
@@ -361,11 +370,19 @@ function Test-AdbFeatures {
             $State.Features.SupportsDuSb = $false
             Write-Host "⚠️  Warning: Your device does not support 'du -sb'. Directory size calculations may be slower or unavailable." -ForegroundColor Yellow
         }
-        $lsProbe = Invoke-AdbCommand -State $State -Arguments @('shell','ls','--time-style=+%s','/')
-        $State = $lsProbe.State
-        $State.Features.SupportsLsTimeStyle = $lsProbe.Success
-        if (-not $lsProbe.Success) {
-            Write-Log "Device does not support 'ls --time-style=+%s'; falling back to default ls output." "WARN"
+        if ($null -eq $State.Features.SupportsLsTimeStyle) {
+            Write-Log "Probing for 'ls --time-style' support." "DEBUG"
+            $lsArgs = @('shell','sh','-c','ls --time-style=+%s / 2>/dev/null')
+            $lsProbe = Invoke-AdbCommand -State $State -Arguments $lsArgs -TimeoutMs 2000 -RawOutput -SuppressErrors
+            $State = $lsProbe.State
+            $State.Features.SupportsLsTimeStyle = ($lsProbe.ExitCode -eq 0)
+            if ($State.Features.SupportsLsTimeStyle) {
+                Write-Log "Device supports 'ls --time-style=+%s'" "DEBUG"
+            } else {
+                Write-Log "Device does not support 'ls --time-style=+%s'; falling back to default ls output." "DEBUG"
+            }
+        } else {
+            Write-Log "Using cached 'ls --time-style' support: $($State.Features.SupportsLsTimeStyle)" "DEBUG"
         }
         $State.Features.Checked = $true
     }
