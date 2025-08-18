@@ -1760,7 +1760,8 @@ function Get-AndroidDirectoryContentsJob {
                 Write-Log "Invalid background job result; falling back to synchronous fetch." "ERROR"
                 $res = & $Fetcher $State $Path
                 if (-not $res) { $res = [pscustomobject]@{ State = $State; Items = $null } }
-                $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue ($jobErrorText ? $jobErrorText : 'Invalid job result')
+                $jobNote = if ($jobErrorText) { $jobErrorText } else { 'Invalid job result' }
+                $res | Add-Member -NotePropertyName JobErrors -NotePropertyValue $jobNote
                 $res.State = $State
                 return $res
             }
