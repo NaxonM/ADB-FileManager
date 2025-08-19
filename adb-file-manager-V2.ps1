@@ -594,7 +594,7 @@ function Push-FilesToAndroid {
     Write-Host "You are about to $actionVerb $($sourceItems.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
     Write-Host "From (PC)    : $(Split-Path $sourceItems[0] -Parent)" -ForegroundColor Yellow
     Write-Host "To   (Android): $destPathFinal" -ForegroundColor Yellow
-    Write-Host "NOTE: ADB push does not support a detailed progress bar." -ForegroundColor DarkGray
+    Write-Host "Progress will be displayed during transfer." -ForegroundColor DarkGray
     $confirm = Read-Host "➡️  Press Enter to begin, or type 'n' to cancel"
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
@@ -603,32 +603,39 @@ function Push-FilesToAndroid {
         $itemInfo = Get-Item -LiteralPath $item
         $sourceItemSafe = """$($itemInfo.FullName)"""
         $destPathSafe = """$destPathFinal"""
-        
-        $adbCommand = { 
-            param($source, $dest)
-            adb push $source $dest 2>&1 | Out-String
-        }
-        $job = Start-Job -ScriptBlock $adbCommand -ArgumentList @($sourceItemSafe, $destPathSafe)
 
-        $spinner = @('|', '/', '-', '\')
-        $spinnerIndex = 0
+        $itemTotalSize = Get-LocalItemSize -ItemPath $itemInfo.FullName
+        $nonProgressLines = @()
+        $itemStartTime = Get-Date
+
+        & adb push -p $sourceItemSafe $destPathSafe 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            if ($line -match '\[(?:\s*)(\d+)%\]\s*(\d+)/(\d+)') {
+                $current = [int64]$matches[2]
+                $total = [int64]$matches[3]
+                Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $current -TotalValue $total -StartTime $itemStartTime
+            } elseif ($line -match '\[(?:\s*)(\d+)%\]\s*(\d+)') {
+                $current = [int64]$matches[2]
+                $total = [int64]$itemTotalSize
+                Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $current -TotalValue $total -StartTime $itemStartTime
+            } elseif ($line -match '(\d+)/(\d+)') {
+                $current = [int64]$matches[1]
+                $total = [int64]$matches[2]
+                Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $current -TotalValue $total -StartTime $itemStartTime
+            } else {
+                $nonProgressLines += $line
+            }
+        }
+        Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $itemTotalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
         Write-Host ""
-        while ($job.State -eq 'Running') {
-            $status = "Pushing $($itemInfo.Name)... $($spinner[$spinnerIndex])"
-            Write-Host "`r$status" -NoNewline
-            $spinnerIndex = ($spinnerIndex + 1) % $spinner.Length
-            Start-Sleep -Milliseconds 150
-        }
-        Write-Host "`r" + (" " * ($status.Length + 5)) + "`r"
 
-        $resultOutput = Receive-Job $job
-        $success = ($job.JobStateInfo.State -eq 'Completed' -and $resultOutput -notmatch 'error:')
-        Remove-Job $job
+        $resultOutput = ($nonProgressLines -join "`n").Trim()
+        $success = ($LASTEXITCODE -eq 0 -and $resultOutput -notmatch 'error:')
 
         if ($success) {
             $successCount++
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
-            Write-Host ($resultOutput | Out-String).Trim() -ForegroundColor Gray
+            if ($resultOutput) { Write-Host $resultOutput -ForegroundColor Gray }
 
             Invalidate-DirectoryCache -DirectoryPath $destPathFinal
 
