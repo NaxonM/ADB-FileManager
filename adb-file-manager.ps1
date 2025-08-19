@@ -273,8 +273,17 @@ function Invoke-AdbCommand {
             }
             if ($stderr -match "device not found|device offline|no devices/emulators found") {
                 Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
+                if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'IsConnected')) {
+                    $State.DeviceStatus | Add-Member -NotePropertyName IsConnected -NotePropertyValue $null
+                }
                 $State.DeviceStatus.IsConnected = $false
+                if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'DeviceName')) {
+                    $State.DeviceStatus | Add-Member -NotePropertyName DeviceName -NotePropertyValue $null
+                }
                 $State.DeviceStatus.DeviceName   = "No Device"
+                if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'SerialNumber')) {
+                    $State.DeviceStatus | Add-Member -NotePropertyName SerialNumber -NotePropertyValue $null
+                }
                 $State.DeviceStatus.SerialNumber = ""
                 $State.LastStatusUpdateTime = [DateTime]::MinValue
                 $State.DirectoryCache.Clear()
@@ -299,8 +308,17 @@ function Invoke-AdbCommand {
         # This makes the script instantly aware of a disconnected device without constant polling.
         if ($output -match "device not found|device offline|no devices/emulators found") {
             Write-Log "Device disconnection detected from command error. Forcing status refresh." "WARN"
+            if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'IsConnected')) {
+                $State.DeviceStatus | Add-Member -NotePropertyName IsConnected -NotePropertyValue $null
+            }
             $State.DeviceStatus.IsConnected = $false
+            if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'DeviceName')) {
+                $State.DeviceStatus | Add-Member -NotePropertyName DeviceName -NotePropertyValue $null
+            }
             $State.DeviceStatus.DeviceName   = "No Device"
+            if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'SerialNumber')) {
+                $State.DeviceStatus | Add-Member -NotePropertyName SerialNumber -NotePropertyValue $null
+            }
             $State.DeviceStatus.SerialNumber = ""
             # By resetting the timestamp, we force Update-DeviceStatus to do a full check next time it's called.
             $State.LastStatusUpdateTime = [DateTime]::MinValue
@@ -397,6 +415,17 @@ function Test-AdbFeatures {
 function Update-DeviceStatus {
     param([hashtable]$State)
 
+    if (-not $State.ContainsKey('DeviceStatus')) {
+        $State.DeviceStatus = @{ IsConnected=$false; DeviceName=''; SerialNumber='' }
+    }
+
+    $ensureDeviceStatusKey = {
+        param($key)
+        if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains $key)) {
+            $State.DeviceStatus | Add-Member -NotePropertyName $key -NotePropertyValue $null
+        }
+    }
+
     # If a device is connected and we checked less than 15 seconds ago, skip the check.
     if ($State.DeviceStatus.IsConnected -and ((Get-Date) - $State.LastStatusUpdateTime).TotalSeconds -lt 15) {
         return [pscustomobject]@{
@@ -447,9 +476,12 @@ function Update-DeviceStatus {
         }
 
         if (-not $needsSelection) {
+            & $ensureDeviceStatusKey 'IsConnected'
             $State.DeviceStatus.IsConnected = $true
+            & $ensureDeviceStatusKey 'SerialNumber'
             $State.DeviceStatus.SerialNumber = $serialNumber
 
+            & $ensureDeviceStatusKey 'DeviceName'
             if ($selectedDevice.Model) {
                 $State.DeviceStatus.DeviceName = $selectedDevice.Model
             } else {
@@ -466,14 +498,20 @@ function Update-DeviceStatus {
                 $State = Test-AdbFeatures -State $State
             }
         } else {
+            & $ensureDeviceStatusKey 'IsConnected'
             $State.DeviceStatus.IsConnected = $false
+            & $ensureDeviceStatusKey 'DeviceName'
             $State.DeviceStatus.DeviceName = "No Device"
+            & $ensureDeviceStatusKey 'SerialNumber'
             $State.DeviceStatus.SerialNumber = ""
             Write-Log "Multiple devices detected. Awaiting user selection." "INFO"
         }
     } else {
+        & $ensureDeviceStatusKey 'IsConnected'
         $State.DeviceStatus.IsConnected = $false
+        & $ensureDeviceStatusKey 'DeviceName'
         $State.DeviceStatus.DeviceName = "No Device"
+        & $ensureDeviceStatusKey 'SerialNumber'
         $State.DeviceStatus.SerialNumber = ""
         Write-Log "No device connected." "INFO"
         $State.Features.Checked = $false
@@ -762,6 +800,9 @@ function Show-UIHeader {
                 $choice = 1
             }
             $selected = $updateResult.Devices[$choice - 1]
+            if (-not ($State.DeviceStatus.PSObject.Properties.Name -contains 'SerialNumber')) {
+                $State.DeviceStatus | Add-Member -NotePropertyName SerialNumber -NotePropertyValue $null
+            }
             $State.DeviceStatus.SerialNumber = $selected.Serial
             $updateResult = Update-DeviceStatus -State $State
             $State = $updateResult.State
