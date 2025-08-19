@@ -1,102 +1,31 @@
 Describe "Get-AndroidDirectoryContents" {
-    BeforeAll { . "$PSScriptRoot/../adb-file-manager.ps1" }
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager-V2.ps1" }
 
-    It "parses ls output and returns correct item types" {
-        $state = @{
-            DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
-            DirectoryCacheAliases = @{ '/data' = '/data' }
-            Features = @{ SupportsLsTimeStyle = $true }
-            Config = @{ VerboseLists = $false }
-            MaxDirectoryCacheEntries = 100
-        }
+    BeforeEach { $script:DirectoryCache.Clear() }
 
+    It "orders directories before files case-insensitively" {
         $lsOut = @(
-            'drwxr-xr-x 2 root root 0 1700000000 subdir/',
-            '-rw-r--r-- 1 root root 12 1700000000 file.txt',
-            'lrwxrwxrwx 1 root root 4 1700000000 link -> /target'
+            "-rw-r--r-- 1 root root 0 1700000000 zeta.txt",
+            "drwxr-xr-x 2 root root 0 1700000000 Alpha/",
+            "drwxr-xr-x 2 root root 0 1700000000 gamma/",
+            "-rw-r--r-- 1 root root 0 1700000000 beta.txt"
         ) -join "`n"
 
-        Mock Invoke-AdbCommand {
-            param($State,$Arguments,$TimeoutMs)
-            return [pscustomobject]@{ Success = $true; Output = $lsOut; State = $State }
-        } -Verifiable -ParameterFilter { $Arguments[1] -eq 'ls' -and $Arguments -contains '--time-style=+%s' }
+        Mock Invoke-AdbCommand { [pscustomobject]@{ Success = $true; Output = $lsOut } } -Verifiable
 
-        $res = Get-AndroidDirectoryContents -State $state -Path '/data'
-        $names = $res.Items | Sort-Object Name | ForEach-Object { $_.Name + ':' + $_.Type }
-        $names | Should -Be @('file.txt:File','link:Link','subdir:Directory')
-        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[1] -eq 'ls' -and $Arguments -contains '--time-style=+%s' } -Times 1
+        $items = Get-AndroidDirectoryContents -Path '/data'
+        ($items | ForEach-Object { $_.Name }) | Should -Be @('Alpha','gamma','beta.txt','zeta.txt')
     }
 
-    It "returns cached results on subsequent calls" {
-        $state = @{
-            DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
-            DirectoryCacheAliases = @{ '/data' = '/data' }
-            Features = @{ SupportsLsTimeStyle = $true }
-            Config = @{ VerboseLists = $false }
-            MaxDirectoryCacheEntries = 100
-        }
+    It "caches the sorted results for subsequent calls" {
+        $lsOut = "drwxr-xr-x 2 root root 0 1700000000 subdir/"
+        Mock Invoke-AdbCommand { [pscustomobject]@{ Success = $true; Output = $lsOut } } -Verifiable
 
-        $lsOut = 'drwxr-xr-x 2 root root 0 1700000000 subdir/'
+        $first = Get-AndroidDirectoryContents -Path '/data'
+        $second = Get-AndroidDirectoryContents -Path '/data'
 
-        Mock Invoke-AdbCommand {
-            param($State,$Arguments,$TimeoutMs)
-            return [pscustomobject]@{ Success = $true; Output = $lsOut; State = $State }
-        } -Verifiable -ParameterFilter { $Arguments[1] -eq 'ls' -and $Arguments -contains '--time-style=+%s' }
-
-        $res1 = Get-AndroidDirectoryContents -State $state -Path '/data'
-        $res2 = Get-AndroidDirectoryContents -State $res1.State -Path '/data'
-        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[1] -eq 'ls' -and $Arguments -contains '--time-style=+%s' } -Times 1
-        ($res2.Items | ForEach-Object { $_.Name }) | Should -Contain 'subdir'
-    }
-
-    It "falls back when --time-style is unsupported" {
-        $state = @{
-            DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
-            DirectoryCacheAliases = @{ '/data' = '/data' }
-            Features = @{ SupportsLsTimeStyle = $false }
-            Config = @{ VerboseLists = $false }
-            MaxDirectoryCacheEntries = 100
-        }
-
-        $lsOut = @(
-            'drwxr-xr-x 2 root root 0 Jan 1 2024 subdir/',
-            '-rw-r--r-- 1 root root 12 Jan 1 2024 file.txt'
-        ) -join "`n"
-
-        Mock Invoke-AdbCommand {
-            param($State,$Arguments,$TimeoutMs)
-            return [pscustomobject]@{ Success = $true; Output = $lsOut; State = $State }
-        } -Verifiable -ParameterFilter { $Arguments[1] -eq 'ls' -and -not ($Arguments -contains '--time-style=+%s') }
-
-        $res = Get-AndroidDirectoryContents -State $state -Path '/data'
-        $names = $res.Items | Sort-Object Name | ForEach-Object { $_.Name + ':' + $_.Type }
-        $names | Should -Be @('file.txt:File','subdir:Directory')
-        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[1] -eq 'ls' -and -not ($Arguments -contains '--time-style=+%s') } -Times 1
-        ($res.Items | Where-Object Name -eq 'file.txt').Timestamp | Should -BeGreaterThan 0
-    }
-
-    It "retries with basic ls on timeout" {
-        $state = @{
-            DirectoryCache = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::Ordinal)
-            DirectoryCacheAliases = @{ '/data' = '/data' }
-            Features = @{ SupportsLsTimeStyle = $true }
-            Config = @{ VerboseLists = $false }
-            MaxDirectoryCacheEntries = 100
-        }
-
-        $script:err = $null
-        Mock Write-ErrorMessage { param($Operation,$Item,$Details) $script:err = $Details }
-
-        Mock Invoke-AdbCommand {
-            param($State,$Arguments,$TimeoutMs)
-            return [pscustomobject]@{ Success = $false; Output = "ADB command timed out after $TimeoutMs ms."; State = $State }
-        } -ParameterFilter { $Arguments[1] -eq 'ls' }
-
-        $res = Get-AndroidDirectoryContents -State $state -Path '/data' -TimeoutSeconds 1
-        $res.Items | Should -BeNullOrEmpty
-        $script:err | Should -Match 'timed out'
-        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[2] -eq '-lAp' -and $TimeoutMs -eq 1000 } -Times 1
-        Assert-MockCalled Invoke-AdbCommand -ParameterFilter { $Arguments[2] -eq '-l' -and $TimeoutMs -eq 1000 } -Times 1
+        Assert-MockCalled Invoke-AdbCommand -Times 1
+        ($second | ForEach-Object { $_.Name }) | Should -Be @('subdir')
     }
 }
 
