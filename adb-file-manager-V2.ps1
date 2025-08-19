@@ -262,8 +262,8 @@ function Sort-BrowseItems {
     param([array]$Items)
 
     $isDirectory = { param($i) $i.Type -eq 'Directory' -or ($i.Type -eq 'Link' -and $i.ResolvedType -eq 'Directory') }
-    $dirs  = $Items | Where-Object { & $isDirectory $_ } | Sort-Object -Property Name -Culture invariant -CaseSensitive:$false
-    $files = $Items | Where-Object { -not (& $isDirectory $_) } | Sort-Object -Property Name -Culture invariant -CaseSensitive:$false
+    $dirs  = $Items | Where-Object { & $isDirectory $_ } | Sort-Object -Property Name -Culture ([System.Globalization.CultureInfo]::InvariantCulture) -CaseSensitive:$false
+    $files = $Items | Where-Object { -not (& $isDirectory $_) } | Sort-Object -Property Name -Culture ([System.Globalization.CultureInfo]::InvariantCulture) -CaseSensitive:$false
     return @($dirs + $files)
 }
 
