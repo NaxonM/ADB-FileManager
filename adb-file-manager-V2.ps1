@@ -370,24 +370,55 @@ function Get-AndroidDirectoryContents {
     $lines = $result.Output -split '\r?\n' | Where-Object { $_ -and $_ -notlike 'total *' -and $_ -notlike '*No such file or directory*' }
 
     foreach ($line in $lines) {
-        if ($line -match '^(?<perms>[\w-]{10})\s+\d+\s+(?<owner>\S+)\s+(?<group>\S+)\s+(?<size>\d+)?\s+(?<date>\d{4}-\d{2}-\d{2}\s\d{2}:\d{2})\s+(?<name>.+?)(?:\s->\s.*)?$') {
-            $name = $Matches.name
-            $type = if ($Matches.perms.StartsWith('d')) { "Directory" } elseif ($Matches.perms.StartsWith('l')) { "Link" } else { "File" }
-            
-            if ($name -in ".", "..") { continue }
-            
-            $size = 0L
-            if ($type -eq 'File' -and -not [string]::IsNullOrEmpty($Matches.size)) {
-                $size = [long]$Matches.size
+        # Capture common fields up to the timestamp/name segment. Some devices omit the size
+        # column for certain entries, so treat it as optional.
+        if ($line -match '^(?<perms>[\w-]{10})\s+\d+\s+(?<owner>\S+)\s+(?<group>\S+)\s+(?<size>\d+)?\s+(?<rest>.+)$') {
+            $perms   = $Matches.perms
+            $sizeStr = $Matches.size
+            $rest    = $Matches.rest
+
+            $name      = $null
+            $timestamp = $null
+
+            # Detect different timestamp formats from various ls implementations
+            if ($rest -match '^(?<ts>\d{10})\s+(?<name>.+?)(?:\s->\s.*)?$') {
+                # --time-style=+%s (epoch seconds)
+                $timestamp = [long]$Matches.ts
+                $name      = $Matches.name
             }
-            
+            elseif ($rest -match '^(?<date>\d{4}-\d{2}-\d{2}\s\d{2}:\d{2})\s+(?<name>.+?)(?:\s->\s.*)?$') {
+                # ISO format (toybox/modern ls)
+                $name      = $Matches.name
+            }
+            elseif ($rest -match '^(?<month>\w{3})\s+(?<day>\d{1,2})\s+(?<time>\d{2}:\d{2})\s+(?<name>.+?)(?:\s->\s.*)?$') {
+                # e.g. "Jan  1 12:34"
+                $name      = $Matches.name
+            }
+            elseif ($rest -match '^(?<month>\w{3})\s+(?<day>\d{1,2})\s+(?<year>\d{4})\s+(?<name>.+?)(?:\s->\s.*)?$') {
+                # e.g. "Jan  1 2024"
+                $name      = $Matches.name
+            }
+            else {
+                # Unknown timestamp format – strip any link target and treat the remainder as the name
+                $name = ($rest -replace '\s->\s.*$', '').Trim()
+            }
+
+            $type = if ($perms.StartsWith('d')) { "Directory" } elseif ($perms.StartsWith('l')) { "Link" } else { "File" }
+
+            if ($name -in ".", "..") { continue }
+
+            $size = 0L
+            if ($type -eq 'File' -and -not [string]::IsNullOrEmpty($sizeStr)) {
+                $size = [long]$sizeStr
+            }
+
             # Always join with the original path for user context, not the canonical one
             $fullPath = if ($normalizedPath.EndsWith('/')) { "$normalizedPath$name" } else { "$normalizedPath/$name" }
 
             $items += [PSCustomObject]@{
                 Name        = $name.Trim()
                 Type        = $type
-                Permissions = $Matches.perms
+                Permissions = $perms
                 FullPath    = $fullPath
                 Size        = $size
             }
