@@ -72,3 +72,23 @@ Describe "Sort-BrowseItems" {
         $sortedNames | Should -Be $expected
     }
 }
+
+Describe "Get-FileEmoji" {
+    BeforeAll { . "$PSScriptRoot/../adb-file-manager-V2.ps1" }
+
+    It "returns the correct emoji for known and unknown extensions" {
+        $cases = @{
+            'picture.png' = '🖼️'
+            'clip.mkv'    = '🎞️'
+            'track.flac'  = '🎵'
+            'manual.pdf'  = '📕'
+            'package.apk' = '🤖'
+            'archive.tar' = '📦'
+            'note.xyz'    = '📄'
+        }
+
+        foreach ($name in $cases.Keys) {
+            Get-FileEmoji -FileName $name | Should -Be $cases[$name]
+        }
+    }
+}

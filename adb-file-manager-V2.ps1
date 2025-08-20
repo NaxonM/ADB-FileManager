@@ -209,6 +209,21 @@ function Format-Bytes {
     return "{0:N2} {1}" -f $value, $units[$index]
 }
 
+# Returns an emoji based on common file extensions.
+function Get-FileEmoji {
+    param([string]$FileName)
+    $ext = [IO.Path]::GetExtension($FileName).ToLowerInvariant()
+    switch ($ext) {
+        { $_ -in '.jpg','.jpeg','.png','.gif','.bmp','.webp','.heic','.svg' } { '🖼️'; break }
+        { $_ -in '.mp4','.mkv','.mov','.avi','.wmv','.flv','.webm' }        { '🎞️'; break }
+        { $_ -in '.mp3','.wav','.flac','.aac','.ogg','.m4a' }               { '🎵'; break }
+        '.pdf'                                                               { '📕'; break }
+        '.apk'                                                               { '🤖'; break }
+        { $_ -in '.zip','.rar','.7z','.tar','.gz','.bz2','.xz' }             { '📦'; break }
+        default                                                              { '📄' }
+    }
+}
+
 function Show-InlineProgress {
     param(
         [string]$Activity,
@@ -427,12 +442,19 @@ function Get-AndroidDirectoryContents {
             # Always join with the original path for user context, not the canonical one
             $fullPath = if ($normalizedPath.EndsWith('/')) { "$normalizedPath$name" } else { "$normalizedPath/$name" }
 
+            $icon = switch ($type) {
+                'Directory' { '📁' }
+                'Link'      { '🔗' }
+                default     { Get-FileEmoji -FileName $name }
+            }
+
             $items += [PSCustomObject]@{
                 Name        = $name.Trim()
                 Type        = $type
                 Permissions = $perms
                 FullPath    = $fullPath
                 Size        = $size
+                Icon        = $icon
             }
         }
     }
@@ -468,12 +490,7 @@ function Pull-FilesFromAndroid {
         
         Write-Host "`nItems available in '$($sourcePath)':" -ForegroundColor Cyan
         for ($i = 0; $i -lt $allItems.Count; $i++) {
-            $icon = switch ($allItems[$i].Type) {
-                "Directory" { "📁" }
-                "File"      { "📄" }
-                default     { "🔗" }
-            }
-            Write-Host (" [{0,2}] {1} {2}" -f ($i+1), $icon, $allItems[$i].Name)
+            Write-Host (" [{0,2}] {1} {2}" -f ($i+1), $allItems[$i].Icon, $allItems[$i].Name)
         }
         $selectionStr = Read-Host "`n➡️  Enter item numbers to pull (e.g., 1,3,5 or 'all')"
         if ($selectionStr -eq 'all') { $itemsToPull = $allItems } 
@@ -689,17 +706,12 @@ function Browse-AndroidFileSystem {
         Write-Host " [ 0] .. (Go Up)" -ForegroundColor Yellow
         for ($i = 0; $i -lt $items.Count; $i++) {
             $item = $items[$i]
-            $icon = switch ($item.Type) {
-                "Directory" { "📁" }
-                "File"      { "📄" }
-                default     { "🔗" }
-            }
             $color = switch ($item.Type) {
                 "Directory" { "Cyan" }
                 "Link"      { "Yellow" }
                 default     { "White" }
             }
-            Write-Host (" [{0,2}] {1} {2}" -f ($i + 1), $icon, $item.Name) -ForegroundColor $color
+            Write-Host (" [{0,2}] {1} {2}" -f ($i + 1), $item.Icon, $item.Name) -ForegroundColor $color
         }
         
         Write-Host ("─" * 62) -ForegroundColor Gray
