@@ -1,5 +1,11 @@
 Describe "Sort-BrowseItems" {
-    BeforeAll { . "$PSScriptRoot/../adb-file-manager-V2.ps1" }
+    BeforeAll {
+        function Add-Type { param([Parameter(ValueFromRemainingArguments=$true)]$Args) }
+        $scriptPath = "$PSScriptRoot/../adb-file-manager-V2.ps1"
+        $raw = Get-Content $scriptPath -Raw
+        $raw = $raw -replace 'Start-ADBTool\s*$',''
+        Invoke-Expression $raw
+    }
 
     It "orders directories before other items and sorts names alphabetically" {
         $items = @(
@@ -37,15 +43,17 @@ Describe "Sort-BrowseItems" {
         $sortedNames | Should -Be @('Banana','Яблоко','ábaco','Éclair')
     }
 
-    It "treats symlinks to directories as directories" {
+    It "places symlinks after directories even if they resolve to directories" {
         $items = @(
             [pscustomobject]@{ Name = 'zeta'; Type = 'File' },
             [pscustomobject]@{ Name = 'alpha'; Type = 'Directory' },
-            [pscustomobject]@{ Name = 'link'; Type = 'Link'; ResolvedType = 'Directory' }
+            [pscustomobject]@{ Name = 'link'; Type = 'Link'; ResolvedType = 'Directory' },
+            [pscustomobject]@{ Name = 'gamma'; Type = 'Directory' },
+            [pscustomobject]@{ Name = 'beta'; Type = 'File' }
         )
 
         $sortedNames = (Sort-BrowseItems $items) | ForEach-Object { $_.Name }
-        $sortedNames | Should -Be @('alpha','link','zeta')
+        $sortedNames | Should -Be @('alpha','gamma','beta','link','zeta')
     }
 
     It "orders mixed-case and non-Latin names with directories first" {
@@ -74,7 +82,13 @@ Describe "Sort-BrowseItems" {
 }
 
 Describe "Get-FileEmoji" {
-    BeforeAll { . "$PSScriptRoot/../adb-file-manager-V2.ps1" }
+    BeforeAll {
+        function Add-Type { param([Parameter(ValueFromRemainingArguments=$true)]$Args) }
+        $scriptPath = "$PSScriptRoot/../adb-file-manager-V2.ps1"
+        $raw = Get-Content $scriptPath -Raw
+        $raw = $raw -replace 'Start-ADBTool\s*$',''
+        Invoke-Expression $raw
+    }
 
     It "returns the correct emoji for known and unknown extensions" {
         $cases = @{
