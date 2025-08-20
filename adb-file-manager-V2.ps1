@@ -628,16 +628,19 @@ function Push-FilesToAndroid {
     if ($confirm -eq 'n') { Write-Host "🟡 Action cancelled." -ForegroundColor Yellow; return }
 
     $successCount = 0; $failureCount = 0
+    # Resolve the adb executable once for reuse
+    $adb = (Get-Command adb -ErrorAction Stop).Source
+
     foreach ($item in $sourceItems) {
         $itemInfo = Get-Item -LiteralPath $item
-        $sourceItemSafe = """$($itemInfo.FullName)"""
-        $destPathSafe = """$destPathFinal"""
+        $sourceItemSafe = $itemInfo.FullName
+        $destPathSafe = $destPathFinal
 
         $itemTotalSize = Get-LocalItemSize -ItemPath $itemInfo.FullName
         $nonProgressLines = @()
         $itemStartTime = Get-Date
 
-        & adb push -p $sourceItemSafe $destPathSafe 2>&1 | ForEach-Object {
+        & $adb push -p $sourceItemSafe $destPathSafe 2>&1 | ForEach-Object {
             $line = $_.ToString()
             if ($line -match '\[(?:\s*)(\d+)%\]\s*(\d+)/(\d+)') {
                 $current = [int64]$matches[2]
@@ -655,21 +658,24 @@ function Push-FilesToAndroid {
                 $nonProgressLines += $line
             }
         }
+
+        $adbExit = $LASTEXITCODE
         Show-InlineProgress -Activity "Pushing $($itemInfo.Name)" -CurrentValue $itemTotalSize -TotalValue $itemTotalSize -StartTime $itemStartTime
         Write-Host ""
 
         $resultOutput = ($nonProgressLines -join "`n").Trim()
-        $success = ($LASTEXITCODE -eq 0 -and $resultOutput -notmatch 'error:')
+        $success = ($adbExit -eq 0 -and $resultOutput -notmatch 'error:')
 
         if ($success) {
             $successCount++
             Write-Host "✅ Pushed $($itemInfo.Name)" -ForegroundColor Green
-            if ($resultOutput) { Write-Host $resultOutput -ForegroundColor Gray }
+            if ($resultOutput) { $resultOutput -split "`n" | ForEach-Object { Write-Host $_ -ForegroundColor Gray } }
 
             Invalidate-DirectoryCache -DirectoryPath $destPathFinal
         } else {
-            $failureCount++; Write-Host "`n❌ FAILED to push $($itemInfo.Name)." -ForegroundColor Red
-            Write-Host "   Error: $resultOutput" -ForegroundColor Red
+            $failureCount++
+            Write-Host "`n❌ FAILED to push $($itemInfo.Name)." -ForegroundColor Red
+            if ($resultOutput) { $resultOutput -split "`n" | ForEach-Object { Write-Host "   $_" -ForegroundColor Red } }
         }
     }
     Write-Host "`n📊 TRANSFER SUMMARY: ✅ $successCount Successful, ❌ $failureCount Failed" -ForegroundColor Cyan
