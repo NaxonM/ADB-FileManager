@@ -1,13 +1,19 @@
 Describe "Get-AndroidDirectoryContents" {
-    BeforeAll { . "$PSScriptRoot/../adb-file-manager-V2.ps1" }
+    BeforeAll {
+        function Add-Type { param([Parameter(ValueFromRemainingArguments=$true)]$Args) }
+        $scriptPath = "$PSScriptRoot/../adb-file-manager-V2.ps1"
+        $raw = Get-Content $scriptPath -Raw
+        $raw = $raw -replace 'Start-ADBTool\s*$',''
+        Invoke-Expression $raw
+    }
 
     BeforeEach { $script:DirectoryCache.Clear() }
 
     It "orders directories before files case-insensitively" {
         $lsOut = @(
             "-rw-r--r-- 1 root root 0 1700000000 zeta.txt",
-            "drwxr-xr-x 2 root root 0 1700000000 Alpha/",
-            "drwxr-xr-x 2 root root 0 1700000000 gamma/",
+            "drwxr-xr-x 2 root root 0 1700000000 Alpha",
+            "drwxr-xr-x 2 root root 0 1700000000 gamma",
             "-rw-r--r-- 1 root root 0 1700000000 beta.txt"
         ) -join "`n"
 
@@ -18,7 +24,7 @@ Describe "Get-AndroidDirectoryContents" {
     }
 
     It "caches the sorted results for subsequent calls" {
-        $lsOut = "drwxr-xr-x 2 root root 0 1700000000 subdir/"
+        $lsOut = "drwxr-xr-x 2 root root 0 1700000000 subdir"
         Mock Invoke-AdbCommand { [pscustomobject]@{ Success = $true; Output = $lsOut } } -Verifiable
 
         $first = Get-AndroidDirectoryContents -Path '/data'

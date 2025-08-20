@@ -275,11 +275,12 @@ function Show-InlineProgress {
 # case-insensitively using invariant culture.
 function Sort-BrowseItems {
     param([array]$Items)
-
-    $isDirectory = { param($i) $i.Type -eq 'Directory' -or ($i.Type -eq 'Link' -and $i.ResolvedType -eq 'Directory') }
-    $dirs  = $Items | Where-Object { & $isDirectory $_ } | Sort-Object -Property Name -Culture ([System.Globalization.CultureInfo]::InvariantCulture) -CaseSensitive:$false
-    $files = $Items | Where-Object { -not (& $isDirectory $_) } | Sort-Object -Property Name -Culture ([System.Globalization.CultureInfo]::InvariantCulture) -CaseSensitive:$false
-    return @($dirs + $files)
+    # Only use the explicit Type field. Any future link-resolution should
+    # populate a dedicated property (e.g. TargetType) before reintroducing
+    # link-aware checks here.
+    $dirs  = @($Items | Where-Object { $_.Type -eq 'Directory' } | Sort-Object -Property Name -Culture ([System.Globalization.CultureInfo]::InvariantCulture) -CaseSensitive:$false)
+    $files = @($Items | Where-Object { $_.Type -ne 'Directory' } | Sort-Object -Property Name -Culture ([System.Globalization.CultureInfo]::InvariantCulture) -CaseSensitive:$false)
+    return $dirs + $files
 }
 
 
