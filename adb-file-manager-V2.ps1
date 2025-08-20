@@ -250,7 +250,7 @@ function Show-InlineProgress {
     
     $displayPercent = $percent
     
-    # FIX: Replaced [System.Math]::Clamp for better PowerShell compatibility.
+    # Cap percent value without using [System.Math]::Clamp for PowerShell compatibility.
     $cappedPercent = $percent
     if ($cappedPercent -gt 100) { $cappedPercent = 100 }
     if ($cappedPercent -lt 0) { $cappedPercent = 0 }
@@ -607,7 +607,7 @@ function Push-FilesToAndroid {
     else { Read-Host "➡️  Enter destination path on Android (e.g., /sdcard/Download/)" }
     if ([string]::IsNullOrWhiteSpace($destPathInput)) { Write-Host "🟡 Action cancelled."; return }
 
-    # --- FIX: Normalize the destination path to use forward slashes ---
+    # --- Normalize the destination path to use forward slashes ---
     $destPathFinal = $destPathInput.Replace('\', '/')
     Write-Log "Normalized destination path from '$destPathInput' to '$destPathFinal'" "DEBUG"
 
