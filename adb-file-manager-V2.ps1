@@ -406,13 +406,11 @@ function Get-AndroidDirectoryContents {
             $rest    = $Matches.rest
 
             $name      = $null
-            $timestamp = $null
 
             # Detect different timestamp formats from various ls implementations
-            if ($rest -match '^(?<ts>\d{10})\s+(?<name>.+?)(?:\s->\s.*)?$') {
+            if ($rest -match '^\d{10}\s+(?<name>.+?)(?:\s->\s.*)?$') {
                 # --time-style=+%s (epoch seconds)
-                $timestamp = [long]$Matches.ts
-                $name      = $Matches.name
+                $name = $Matches.name
             }
             elseif ($rest -match '^(?<date>\d{4}-\d{2}-\d{2}\s\d{2}:\d{2})\s+(?<name>.+?)(?:\s->\s.*)?$') {
                 # ISO format (toybox/modern ls)
