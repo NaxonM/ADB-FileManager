@@ -587,11 +587,9 @@ function Pull-FilesFromAndroid {
 
 function Push-FilesToAndroid {
     param(
-        [switch]$Move,
         [string]$DestinationPath
     )
-    $actionVerb = if ($Move) { "MOVE" } else { "PUSH" }
-    Write-Host "`n📤 $actionVerb ITEMS TO ANDROID" -ForegroundColor Magenta
+    Write-Host "`n📤 PUSH ITEMS TO ANDROID" -ForegroundColor Magenta
     
     $uploadType = Read-Host "What do you want to upload? (F)iles or a (D)irectory?"
     
@@ -624,7 +622,7 @@ function Push-FilesToAndroid {
         $totalSize += Get-LocalItemSize -ItemPath $item
     }
     Write-Host "`r" + (" " * 50) + "`r"
-    Write-Host "You are about to $actionVerb $($sourceItems.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
+    Write-Host "You are about to PUSH $($sourceItems.Count) item(s) with a total size of $(Format-Bytes $totalSize)."
     Write-Host "From (PC)    : $(Split-Path $sourceItems[0] -Parent)" -ForegroundColor Yellow
     Write-Host "To   (Android): $destPathFinal" -ForegroundColor Yellow
     Write-Host "Progress will be displayed during transfer." -ForegroundColor DarkGray
@@ -671,16 +669,6 @@ function Push-FilesToAndroid {
             if ($resultOutput) { Write-Host $resultOutput -ForegroundColor Gray }
 
             Invalidate-DirectoryCache -DirectoryPath $destPathFinal
-
-            if ($Move) {
-                Write-Host "   - Removing source item..." -NoNewline
-                try {
-                    Remove-Item -LiteralPath $itemInfo.FullName -Force -Recurse -ErrorAction Stop
-                    Write-Host " ✅" -ForegroundColor Green
-                } catch {
-                    Write-Host " ❌ (Failed to delete)" -ForegroundColor Red
-                }
-            }
         } else {
             $failureCount++; Write-Host "`n❌ FAILED to push $($itemInfo.Name)." -ForegroundColor Red
             Write-Host "   Error: $resultOutput" -ForegroundColor Red
